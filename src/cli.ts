@@ -5,9 +5,11 @@ import { pc } from "./utils/terminal.ts";
 import { updateCommand } from "./commands/update.ts";
 import { setupCommand } from "./commands/setup.ts";
 import { detectCommand } from "./commands/detect.ts";
-import { loadConfig } from "./config.ts";
+import { runCommand } from "./commands/run.ts";
+import { initCommand } from "./commands/init.ts";
+import { loadConfig, type PgdevConfig } from "./config.ts";
 
-function splitCommand(command: string): string[] {
+export function splitCommand(command: string): string[] {
   return command.trim().split(/\s+/);
 }
 
@@ -73,9 +75,9 @@ async function printVersion(): Promise<void> {
   }
 }
 
-function printHelp(): void {
+function printHelp(config?: PgdevConfig): void {
   const version = getCurrentVersion();
-  console.log(`
+  let help = `
 ${pc.bold(PACKAGE_NAME)} ${pc.dim(`v${version}`)} - PostgreSQL and NpgsqlRest Development Toolchain
 
 ${pc.bold("Usage:")}
@@ -83,23 +85,32 @@ ${pc.bold("Usage:")}
 
 ${pc.bold("Commands:")}
   detect          Auto-detect installed tools and configure
+  init            Initialize config files and commands
   setup           Set up development tools
   update          Update ${PACKAGE_NAME} to the latest version
+`;
 
+  const commands = config?.npgsqlrest?.commands;
+  if (commands && Object.keys(commands).length > 0) {
+    help += `\n${pc.bold("NpgsqlRest Commands:")}  ${pc.dim("(from pgdev.toml)")}\n`;
+    const maxLen = Math.max(...Object.keys(commands).map((k) => k.length));
+    for (const [name, args] of Object.entries(commands)) {
+      help += `  ${name.padEnd(Math.max(maxLen, 14))}  ${pc.dim(args)}\n`;
+    }
+  }
+
+  help += `
 ${pc.bold("Options:")}
   --version, -v   Show version number
   --help, -h      Show this help message
-`.trimStart());
+`;
+
+  console.log(help.trimStart());
 }
 
 export async function run(): Promise<void> {
   const args = process.argv.slice(2);
   const command = args[0];
-
-  if (!command || command === "--help" || command === "-h") {
-    printHelp();
-    return;
-  }
 
   if (command === "--version" || command === "-v") {
     await printVersion();
@@ -108,9 +119,17 @@ export async function run(): Promise<void> {
 
   const config = await loadConfig();
 
+  if (!command || command === "--help" || command === "-h") {
+    printHelp(config);
+    return;
+  }
+
   switch (command) {
     case "detect":
       await detectCommand(config);
+      break;
+    case "init":
+      await initCommand(config);
       break;
     case "setup":
       await setupCommand(config);
@@ -119,8 +138,12 @@ export async function run(): Promise<void> {
       await updateCommand(config);
       break;
     default:
-      console.error(`Unknown command: ${pc.bold(command)}\n`);
-      printHelp();
-      process.exit(1);
+      if (config.npgsqlrest.commands[command]) {
+        await runCommand(config, command, args.slice(1));
+      } else {
+        console.error(`Unknown command: ${pc.bold(command)}\n`);
+        printHelp(config);
+        process.exit(1);
+      }
   }
 }

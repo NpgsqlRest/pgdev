@@ -32,6 +32,14 @@ export function ask(question: string, options: Option[]): number {
   }
 }
 
+export function askConfirm(question: string, defaultYes = false): boolean {
+  const hint = defaultYes ? "Y/n" : "y/N";
+  const input = prompt(`  ${pc.bold(question)} ${pc.dim(`[${hint}]`)}`);
+  const answer = (input ?? "").trim().toLowerCase();
+  if (answer === "") return defaultYes;
+  return answer === "y" || answer === "yes";
+}
+
 export function askPath(question: string, defaultPath: string): string {
   console.log();
   console.log(`  ${pc.bold(question)}`);
@@ -39,5 +47,6 @@ export function askPath(question: string, defaultPath: string): string {
   if (input === null) {
     process.exit(0);
   }
-  return input.trim() || defaultPath;
+  const value = input.trim() || defaultPath;
+  return value.replace(/\/+$/, "") || ".";
 }

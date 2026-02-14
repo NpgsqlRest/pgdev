@@ -1,27 +1,29 @@
 import { error, pc } from "./utils/terminal.ts";
 
+export interface NpgsqlRestConfig {
+  commands: Record<string, string>;
+}
+
 export interface PgdevConfig {
-  project: {
-    name: string;
-  };
   tools: {
     npgsqlrest: string;
     psql: string;
     pg_dump: string;
     pg_restore: string;
   };
+  npgsqlrest: NpgsqlRestConfig;
   verbose: boolean;
 }
 
 const defaults: PgdevConfig = {
-  project: {
-    name: "",
-  },
   tools: {
     npgsqlrest: "npgsqlrest",
     psql: "psql",
     pg_dump: "pg_dump",
     pg_restore: "pg_restore",
+  },
+  npgsqlrest: {
+    commands: {},
   },
   verbose: false,
 };
@@ -76,10 +78,39 @@ export async function updateLocalConfig(section: string, key: string, value: str
   await Bun.write(path, content);
 }
 
+export function serializeToml(data: Record<string, unknown>, prefix = ""): string {
+  let result = "";
+  const scalars: [string, unknown][] = [];
+  const sections: [string, Record<string, unknown>][] = [];
+
+  for (const [key, value] of Object.entries(data)) {
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      sections.push([key, value as Record<string, unknown>]);
+    } else {
+      scalars.push([key, value]);
+    }
+  }
+
+  for (const [key, value] of scalars) {
+    result += `${key} = ${JSON.stringify(value)}\n`;
+  }
+
+  for (const [key, obj] of sections) {
+    const fullKey = prefix ? `${prefix}.${key}` : key;
+    result += `\n[${fullKey}]\n`;
+    result += serializeToml(obj, fullKey);
+  }
+
+  return result;
+}
+
 export async function loadConfig(): Promise<PgdevConfig> {
   const cwd = process.cwd();
   const project = await readToml(`${cwd}/pgdev.toml`);
   const local = await readToml(`${cwd}/pgdev.local.toml`);
+
+  const projectNpgsqlrest = project?.npgsqlrest as Partial<NpgsqlRestConfig> | undefined;
+  const localNpgsqlrest = local?.npgsqlrest as Partial<NpgsqlRestConfig> | undefined;
 
   return {
     ...defaults,
@@ -89,6 +120,15 @@ export async function loadConfig(): Promise<PgdevConfig> {
       ...defaults.tools,
       ...(project?.tools as Record<string, string> | undefined),
       ...(local?.tools as Record<string, string> | undefined),
+    },
+    npgsqlrest: {
+      ...defaults.npgsqlrest,
+      ...projectNpgsqlrest,
+      ...localNpgsqlrest,
+      commands: {
+        ...projectNpgsqlrest?.commands,
+        ...localNpgsqlrest?.commands,
+      },
     },
   } as PgdevConfig;
 }

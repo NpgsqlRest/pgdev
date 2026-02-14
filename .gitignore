@@ -4,3 +4,5 @@ bun.lock
 .claude
 .DS_Store
 pgdev.local.toml
+pgdev.toml
+config

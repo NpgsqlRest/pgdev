@@ -1,0 +1,7 @@
+//
+// NpgsqlRest Configuration
+// Reference: https://npgsqlrest.github.io/config/
+// Default values: https://npgsqlrest.github.io/config/latest.html
+// Guide: https://npgsqlrest.github.io/guide/configuration.html
+//
+{}
