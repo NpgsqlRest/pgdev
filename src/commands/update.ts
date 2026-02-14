@@ -1,10 +1,23 @@
 import { $ } from "bun";
 import { PACKAGE_NAME } from "../constants.ts";
-import { spinner, success, error, pc } from "../utils/terminal.ts";
+import { spinner, success, error, pc, logCommand, type Spinner } from "../utils/terminal.ts";
 import { getCurrentVersion, getLatestVersion, isNewer } from "../utils/version.ts";
+import type { PgdevConfig } from "../config.ts";
 
-export async function updateCommand(): Promise<void> {
-  const s = spinner("Checking for updates...");
+function noopSpinner(): Spinner {
+  return {
+    stop(finalText?: string) {
+      if (finalText) process.stderr.write(`${finalText}\n`);
+    },
+    update() {},
+    pause() {},
+    resume() {},
+  };
+}
+
+export async function updateCommand(config: PgdevConfig): Promise<void> {
+  const { verbose } = config;
+  const s = verbose ? noopSpinner() : spinner("Checking for updates...");
 
   try {
     const currentVersion = getCurrentVersion();
@@ -17,11 +30,27 @@ export async function updateCommand(): Promise<void> {
 
     s.update(`Updating ${PACKAGE_NAME} v${currentVersion} → v${latestVersion}...`);
 
-    const result = await $`npm install -g ${PACKAGE_NAME}@${latestVersion}`.quiet();
+    const installCmd = ["npm", "install", "-g", `${PACKAGE_NAME}@${latestVersion}`];
+    let exitCode: number;
+    let stderr = "";
 
-    if (result.exitCode !== 0) {
+    if (verbose) {
+      logCommand(installCmd);
+      const proc = Bun.spawn(installCmd, {
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      exitCode = await proc.exited;
+    } else {
+      const result = await $`${installCmd}`.quiet().nothrow();
+      exitCode = result.exitCode;
+      stderr = result.stderr.toString();
+    }
+
+    if (exitCode !== 0) {
       s.stop(error(`Failed to update ${PACKAGE_NAME}`));
-      console.error(pc.dim(result.stderr.toString()));
+      if (!verbose) console.error(pc.dim(stderr));
       process.exit(1);
     }
 

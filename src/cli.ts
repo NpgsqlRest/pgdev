@@ -1,21 +1,89 @@
+import { $ } from "bun";
 import { PACKAGE_NAME } from "./constants.ts";
 import { getCurrentVersion } from "./utils/version.ts";
 import { pc } from "./utils/terminal.ts";
 import { updateCommand } from "./commands/update.ts";
+import { setupCommand } from "./commands/setup.ts";
+import { detectCommand } from "./commands/detect.ts";
+import { loadConfig } from "./config.ts";
 
-function printVersion(): void {
-  console.log(`${PACKAGE_NAME} v${getCurrentVersion()}`);
+function splitCommand(command: string): string[] {
+  return command.trim().split(/\s+/);
+}
+
+function commandError(command: string, stderr: string): string {
+  if (stderr.includes("command not found")) return `not found: ${command}`;
+  return `error: ${stderr || "unknown failure"}`;
+}
+
+async function getNpgsqlRestVersion(command: string): Promise<string> {
+  try {
+    const parts = splitCommand(command);
+    const result = await $`${parts} --version --json`.quiet().nothrow();
+    if (result.exitCode !== 0) return commandError(command, result.stderr.toString().trim());
+    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
+    return json.versions?.NpgsqlRest ?? "unknown output";
+  } catch (err) {
+    return `error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function getPgToolVersion(command: string): Promise<string> {
+  try {
+    const parts = splitCommand(command);
+    const result = await $`${parts} --version`.quiet().nothrow();
+    if (result.exitCode !== 0) return commandError(command, result.stderr.toString().trim());
+    const output = result.stdout.toString().trim();
+    const match = output.match(/(\d+(?:\.\d+)+)/);
+    return match?.[1] ?? "unknown output";
+  } catch (err) {
+    return `error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+async function printVersion(): Promise<void> {
+  const config = await loadConfig();
+  const { tools } = config;
+
+  const [npgsqlrest, psql, pgDump, pgRestore] = await Promise.all([
+    getNpgsqlRestVersion(tools.npgsqlrest),
+    getPgToolVersion(tools.psql),
+    getPgToolVersion(tools.pg_dump),
+    getPgToolVersion(tools.pg_restore),
+  ]);
+
+  const entries: [string, string][] = [
+    [PACKAGE_NAME, getCurrentVersion()],
+    ["npgsqlrest", npgsqlrest],
+    ["psql", psql],
+    ["pg_dump", pgDump],
+    ["pg_restore", pgRestore],
+  ];
+
+  const maxLen = Math.max(...entries.map(([name]) => name.length));
+
+  for (const [name, ver] of entries) {
+    const label = name.padEnd(maxLen);
+    const value =
+      ver.startsWith("not found:") ? pc.dim(ver) :
+      ver.startsWith("error:") ? pc.red(ver) :
+      ver.startsWith("unknown") ? pc.yellow(ver) :
+      pc.green(ver);
+    console.log(`${label}  ${value}`);
+  }
 }
 
 function printHelp(): void {
   const version = getCurrentVersion();
   console.log(`
-${pc.bold(PACKAGE_NAME)} ${pc.dim(`v${version}`)} - PostgreSQL Development Toolchain
+${pc.bold(PACKAGE_NAME)} ${pc.dim(`v${version}`)} - PostgreSQL and NpgsqlRest Development Toolchain
 
 ${pc.bold("Usage:")}
   ${PACKAGE_NAME} <command> [options]
 
 ${pc.bold("Commands:")}
+  detect          Auto-detect installed tools and configure
+  setup           Set up development tools
   update          Update ${PACKAGE_NAME} to the latest version
 
 ${pc.bold("Options:")}
@@ -34,13 +102,21 @@ export async function run(): Promise<void> {
   }
 
   if (command === "--version" || command === "-v") {
-    printVersion();
+    await printVersion();
     return;
   }
 
+  const config = await loadConfig();
+
   switch (command) {
+    case "detect":
+      await detectCommand(config);
+      break;
+    case "setup":
+      await setupCommand(config);
+      break;
     case "update":
-      await updateCommand();
+      await updateCommand(config);
       break;
     default:
       console.error(`Unknown command: ${pc.bold(command)}\n`);

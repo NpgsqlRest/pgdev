@@ -1,29 +1,31 @@
 {
   "name": "pgdev",
-  "version": "0.0.2",
-  "type": "module",
-  "description": "PostgreSQL Development Toolchain",
-  "license": "MIT",
+  "version": "0.0.3",
   "author": "vbilopav",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NpgsqlRest/pgdev"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "picocolors": "^1.1.1"
+  },
   "bin": {
     "pgdev": "dist/cli.js"
   },
+  "description": "PostgreSQL and NpgsqlRest Development Toolchain",
   "files": [
     "dist/cli.js"
   ],
+  "license": "MIT",
   "scripts": {
     "dev": "bun run pgdev.ts",
     "typecheck": "bun x tsc --noEmit",
     "build": "bun build ./pgdev.ts --target=bun --minify --outfile dist/cli.js",
     "prepublishOnly": "bun run build"
   },
-  "dependencies": {},
-  "devDependencies": {
-    "@types/bun": "latest",
-    "picocolors": "^1.1.1"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/NpgsqlRest/pgdev"
-  }
+  "trustedDependencies": [
+    "npgsqlrest"
+  ],
+  "type": "module"
 }

@@ -8,11 +8,14 @@ const SPINNER_INTERVAL = 80;
 export interface Spinner {
   stop(finalText?: string): void;
   update(text: string): void;
+  pause(): void;
+  resume(): void;
 }
 
 export function spinner(text: string): Spinner {
   let frameIndex = 0;
   let currentText = text;
+  let intervalId: ReturnType<typeof setInterval> | null;
 
   const clearLine = () => {
     process.stderr.write("\r\x1b[K");
@@ -25,11 +28,12 @@ export function spinner(text: string): Spinner {
   };
 
   render();
-  const interval = setInterval(render, SPINNER_INTERVAL);
+  intervalId = setInterval(render, SPINNER_INTERVAL);
 
   return {
     stop(finalText?: string) {
-      clearInterval(interval);
+      if (intervalId) clearInterval(intervalId);
+      intervalId = null;
       clearLine();
       if (finalText) {
         process.stderr.write(`${finalText}\n`);
@@ -37,6 +41,15 @@ export function spinner(text: string): Spinner {
     },
     update(newText: string) {
       currentText = newText;
+    },
+    pause() {
+      if (intervalId) clearInterval(intervalId);
+      intervalId = null;
+      clearLine();
+    },
+    resume() {
+      render();
+      intervalId = setInterval(render, SPINNER_INTERVAL);
     },
   };
 }
@@ -51,4 +64,15 @@ export function error(text: string): string {
 
 export function info(text: string): string {
   return `${pc.blue("ℹ")} ${text}`;
+}
+
+export function logCommand(cmd: string[]): void {
+  console.error(`\n${pc.cyan("$")} ${cmd.join(" ")}`);
+}
+
+export function logOutput(output: string): void {
+  if (!output) return;
+  for (const line of output.split("\n")) {
+    console.error(pc.dim(`    ${line}`));
+  }
 }
