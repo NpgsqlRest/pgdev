@@ -2,6 +2,7 @@ node_modules/
 dist/
 bun.lock
 .claude
+CLAUDE.md
 .DS_Store
 pgdev.local.toml
 pgdev.toml

@@ -4,6 +4,13 @@ export interface NpgsqlRestConfig {
   commands: Record<string, string>;
 }
 
+export interface ConnectionConfig {
+  mode: "shared" | "independent";
+  config_file?: string;
+  connection_name?: string;
+  connection_string?: string;
+}
+
 export interface PgdevConfig {
   tools: {
     npgsqlrest: string;
@@ -12,6 +19,7 @@ export interface PgdevConfig {
     pg_restore: string;
   };
   npgsqlrest: NpgsqlRestConfig;
+  connection: ConnectionConfig;
   verbose: boolean;
 }
 
@@ -24,6 +32,10 @@ const defaults: PgdevConfig = {
   },
   npgsqlrest: {
     commands: {},
+  },
+  connection: {
+    mode: "shared",
+    connection_name: "Default",
   },
   verbose: false,
 };
@@ -129,6 +141,11 @@ export async function loadConfig(): Promise<PgdevConfig> {
         ...projectNpgsqlrest?.commands,
         ...localNpgsqlrest?.commands,
       },
+    },
+    connection: {
+      ...defaults.connection,
+      ...(project?.connection as Partial<ConnectionConfig> | undefined),
+      ...(local?.connection as Partial<ConnectionConfig> | undefined),
     },
   } as PgdevConfig;
 }

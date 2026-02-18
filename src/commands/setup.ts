@@ -142,18 +142,19 @@ async function installViaPackageManager(pm: "npm" | "bun", scope: "local" | "glo
   return version ?? "";
 }
 
-async function installViaBinary(): Promise<string> {
+async function installViaBinary(): Promise<void> {
   const asset = getBinaryAsset();
   if (!asset) {
     console.error(error(`No binary available for ${process.platform}-${process.arch}`));
     process.exit(1);
   }
 
-  const destChoice = ask("Where should the binary be saved?", [
+  const destChoice = await ask("Where should the binary be saved?", [
     { label: "./npgsqlrest" + asset.ext, description: "Current directory" },
     { label: "/usr/local/bin/npgsqlrest", description: "System-wide (may need sudo)" },
     { label: "Custom path", description: "Enter your own path" },
   ]);
+  if (destChoice === -1) return;
 
   let dest: string;
   if (destChoice === 0) {
@@ -195,17 +196,16 @@ async function installViaBinary(): Promise<string> {
     console.log(pc.dim("  Could not verify version — run pgdev -v to check."));
   }
   console.log(info(`Config updated: tools.npgsqlrest = "${dest}"`));
-
-  return version ?? "";
 }
 
-async function installViaDocker(): Promise<string> {
-  const variant = ask("Which Docker image variant?", [
+async function installViaDocker(): Promise<void> {
+  const variant = await ask("Which Docker image variant?", [
     { label: "latest", description: "Standard AOT image" },
     { label: "latest-jit", description: "High-concurrency JIT image" },
     { label: "latest-arm", description: "ARM64 image" },
     { label: "latest-bun", description: "Bun runtime image" },
   ]);
+  if (variant === -1) return;
 
   const tags = ["latest", "latest-jit", "latest-arm", "latest-bun"];
   const tag = tags[variant];
@@ -225,8 +225,6 @@ async function installViaDocker(): Promise<string> {
 
   s.stop(success(`Pulled Docker image ${image}`));
   console.log(info(`Config updated: tools.npgsqlrest = "${configValue}"`));
-
-  return tag;
 }
 
 async function detectPackageManager(): Promise<"brew" | "apt" | "apk" | "dnf" | null> {
@@ -267,32 +265,35 @@ async function setupPostgresTools(): Promise<void> {
   let packageDesc: string;
 
   if (pm === "brew") {
-    const brewChoice = ask("What would you like to install?", [
+    const brewChoice = await ask("What would you like to install?", [
       { label: "libpq", description: "Client tools only — psql, pg_dump, pg_restore (~7 MB, latest version)" },
       { label: "postgresql", description: "Full PostgreSQL server + client tools (~19 MB, pick version)" },
     ]);
+    if (brewChoice === -1) return;
     if (brewChoice === 0) {
       installCmd = ["brew", "install", "libpq"];
       packageDesc = "libpq";
     } else {
-      const versionChoice = ask("Which PostgreSQL version?", [
+      const versionChoice = await ask("Which PostgreSQL version?", [
         { label: "18", description: "Latest (PostgreSQL 18)" },
         { label: "17", description: "PostgreSQL 17" },
         { label: "16", description: "PostgreSQL 16" },
         { label: "15", description: "PostgreSQL 15" },
       ]);
+      if (versionChoice === -1) return;
       const versions = ["18", "17", "16", "15"];
       const version = versions[versionChoice];
       installCmd = ["brew", "install", `postgresql@${version}`];
       packageDesc = `postgresql@${version}`;
     }
   } else {
-    const versionChoice = ask("Which PostgreSQL version?", [
+    const versionChoice = await ask("Which PostgreSQL version?", [
       { label: "18", description: "Latest (PostgreSQL 18)" },
       { label: "17", description: "PostgreSQL 17" },
       { label: "16", description: "PostgreSQL 16" },
       { label: "15", description: "PostgreSQL 15" },
     ]);
+    if (versionChoice === -1) return;
     const versions = ["18", "17", "16", "15"];
     const version = versions[versionChoice];
 
@@ -366,25 +367,28 @@ async function setupPostgresTools(): Promise<void> {
 }
 
 async function setupNpgsqlRest(): Promise<void> {
-  const method = ask("How would you like to install NpgsqlRest?", [
+  const method = await ask("How would you like to install NpgsqlRest?", [
     { label: "npm", description: "Install as npm package" },
     { label: "bun", description: "Install as bun package" },
     { label: "binary", description: "Download standalone executable" },
     { label: "docker", description: "Pull Docker image" },
   ]);
+  if (method === -1) return;
 
   if (method <= 1) {
     const pm = method === 0 ? "npm" : "bun" as const;
-    const scope = ask("Install scope?", [
+    const scope = await ask("Install scope?", [
       { label: "local", description: "Project dependency (node_modules/.bin/)" },
       { label: "global", description: "System-wide installation" },
     ]);
+    if (scope === -1) return;
     let dev = false;
     if (scope === 0) {
-      const depType = ask("Dependency type?", [
+      const depType = await ask("Dependency type?", [
         { label: "dependencies", description: "Production dependency" },
         { label: "devDependencies", description: "Development only (-D)" },
       ]);
+      if (depType === -1) return;
       dev = depType === 1;
     }
     await installViaPackageManager(pm, scope === 0 ? "local" : "global", dev);
@@ -396,17 +400,21 @@ async function setupNpgsqlRest(): Promise<void> {
 }
 
 export async function setupCommand(_config: PgdevConfig): Promise<void> {
-  const tool = ask("What would you like to set up?", [
-    { label: "npgsqlrest", description: "NpgsqlRest server" },
-    { label: "pg-tools", description: "PostgreSQL client tools (psql, pg_dump, pg_restore)" },
-  ]);
+  while (true) {
+    const tool = await ask("What would you like to set up?", [
+      { label: "npgsqlrest", description: "NpgsqlRest server" },
+      { label: "pg-tools", description: "PostgreSQL client tools (psql, pg_dump, pg_restore)" },
+    ], { exit: true });
 
-  switch (tool) {
-    case 0:
-      await setupNpgsqlRest();
-      break;
-    case 1:
-      await setupPostgresTools();
-      break;
+    if (tool === -1) return;
+
+    switch (tool) {
+      case 0:
+        await setupNpgsqlRest();
+        break;
+      case 1:
+        await setupPostgresTools();
+        break;
+    }
   }
 }

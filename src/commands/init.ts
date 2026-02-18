@@ -73,7 +73,7 @@ function listExistingDirs(): string[] {
 
 const TEMPLATE_DIRS = ["config", "npgsqlrest", "server"];
 
-function askConfigDir(): string {
+async function askConfigDir(): Promise<string | null> {
   const existingDirs = listExistingDirs();
   const seen = new Set<string>();
   const options: { label: string; description: string }[] = [];
@@ -100,7 +100,8 @@ function askConfigDir(): string {
   // Custom input
   options.push({ label: "Custom path...", description: "Type a directory path" });
 
-  const choice = ask("Where should config files live?", options);
+  const choice = await ask("Where should config files live?", options);
+  if (choice === -1) return null;
 
   if (choice === options.length - 1) {
     return askPath("Enter config directory path", ".");
@@ -157,13 +158,15 @@ async function mergeTomlConfig(
 }
 
 async function initNpgsqlRest(_config: PgdevConfig): Promise<void> {
-  const configDir = askConfigDir();
+  const configDir = await askConfigDir();
+  if (configDir === null) return;
 
-  const structureChoice = ask("Config file structure?", [
+  const structureChoice = await ask("Config file structure?", [
     { label: "Single file", description: "One appsettings.json" },
     { label: "Dev + Prod", description: "Separate development and production configs" },
     { label: "Dev + Prod + Local", description: "Plus personal overrides, gitignored (recommended)" },
   ]);
+  if (structureChoice === -1) return;
 
   // Create config directory if needed
   if (configDir !== ".") {
@@ -237,13 +240,17 @@ async function initNpgsqlRest(_config: PgdevConfig): Promise<void> {
 }
 
 export async function initCommand(config: PgdevConfig): Promise<void> {
-  const tool = ask("What would you like to initialize?", [
-    { label: "npgsqlrest", description: "NpgsqlRest server config files and commands" },
-  ]);
+  while (true) {
+    const tool = await ask("What would you like to initialize?", [
+      { label: "npgsqlrest", description: "NpgsqlRest server config files and commands" },
+    ], { exit: true });
 
-  switch (tool) {
-    case 0:
-      await initNpgsqlRest(config);
-      break;
+    if (tool === -1) return;
+
+    switch (tool) {
+      case 0:
+        await initNpgsqlRest(config);
+        break;
+    }
   }
 }

@@ -205,10 +205,11 @@ export async function detectCommand(config: PgdevConfig): Promise<void> {
       chosen = pgInstalls[0];
     } else {
       ps.stop(success(`Found ${pgInstalls.length} PostgreSQL installations`));
-      const choice = ask("Which installation should pgdev use?", pgInstalls.map((p) => ({
+      const choice = await ask("Which installation should pgdev use?", pgInstalls.map((p) => ({
         label: `v${p.version}`,
         description: p.binDir ? `${p.source} (${p.binDir})` : p.source,
-      })));
+      })), { exit: true });
+      if (choice === -1) return;
       chosen = pgInstalls[choice];
     }
 

@@ -7,6 +7,7 @@ import { setupCommand } from "./commands/setup.ts";
 import { detectCommand } from "./commands/detect.ts";
 import { runCommand } from "./commands/run.ts";
 import { initCommand } from "./commands/init.ts";
+import { configCommand } from "./commands/config.ts";
 import { loadConfig, type PgdevConfig } from "./config.ts";
 
 export function splitCommand(command: string): string[] {
@@ -84,6 +85,7 @@ ${pc.bold("Usage:")}
   ${PACKAGE_NAME} <command> [options]
 
 ${pc.bold("Commands:")}
+  config          Edit NpgsqlRest config files and pgdev connection
   detect          Auto-detect installed tools and configure
   init            Initialize config files and commands
   setup           Set up development tools
@@ -125,6 +127,9 @@ export async function run(): Promise<void> {
   }
 
   switch (command) {
+    case "config":
+      await configCommand(config);
+      break;
     case "detect":
       await detectCommand(config);
       break;
