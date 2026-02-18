@@ -1,16 +1,20 @@
 import { $ } from "bun";
-import { updateLocalConfig, type PgdevConfig } from "../config.ts";
-import { spinner, success, error, info, pc, logCommand, type Spinner } from "../utils/terminal.ts";
-import { ask } from "../utils/prompt.ts";
+import { logCommand, type Spinner } from "./terminal.ts";
 
-interface Detection {
+export interface Detection {
   command: string;
   version: string;
   source: string;
 }
 
-/** No-op spinner for verbose mode — just prints the final result line */
-function noopSpinner(): Spinner {
+export interface PgInstallation {
+  binDir: string | null; // null = bare commands on PATH
+  version: string;
+  source: string;
+}
+
+/** No-op spinner — prints final result line only. Used by setup/install commands. */
+export function noopSpinner(): Spinner {
   return {
     stop(finalText?: string) {
       if (finalText) process.stderr.write(`${finalText}\n`);
@@ -21,7 +25,7 @@ function noopSpinner(): Spinner {
   };
 }
 
-async function tryNpgsqlRest(command: string, verbose: boolean): Promise<string | null> {
+export async function tryNpgsqlRest(command: string, verbose: boolean): Promise<string | null> {
   try {
     const parts = command.trim().split(/\s+/);
     const cmd = [...parts, "--version", "--json"];
@@ -48,7 +52,7 @@ async function tryNpgsqlRest(command: string, verbose: boolean): Promise<string 
   }
 }
 
-async function detectNpgsqlRest(verbose: boolean): Promise<Detection | null> {
+export async function detectNpgsqlRest(verbose: boolean): Promise<Detection | null> {
   const cwd = process.cwd();
   const ext = process.platform === "win32" ? ".exe" : "";
 
@@ -77,7 +81,7 @@ async function detectNpgsqlRest(verbose: boolean): Promise<Detection | null> {
     return { command: "npgsqlrest", version: directVersion, source: "global install or standalone binary" };
   }
 
-  // 3. Check docker — try platform-appropriate tags
+  // 4. Check docker — try platform-appropriate tags
   const dockerTags = process.arch === "arm64"
     ? ["latest-arm", "latest-bun", "latest", "latest-jit"]
     : ["latest", "latest-jit", "latest-arm", "latest-bun"];
@@ -102,16 +106,10 @@ async function detectNpgsqlRest(verbose: boolean): Promise<Detection | null> {
   return null;
 }
 
-interface PgInstallation {
-  binDir: string | null;  // null = bare commands on PATH
-  version: string;
-  source: string;
-}
-
-async function tryPsqlVersion(psqlPath: string): Promise<string | null> {
+export async function verifyPgTool(command: string): Promise<string | null> {
   try {
-    const cmd = [psqlPath, "--version"];
-    const result = await $`${cmd}`.quiet().nothrow();
+    const parts = command.trim().split(/\s+/);
+    const result = await $`${parts} --version`.quiet().nothrow();
     if (result.exitCode !== 0) return null;
     const output = result.stdout.toString().trim();
     const match = output.match(/(\d+(?:\.\d+)+)/);
@@ -121,7 +119,19 @@ async function tryPsqlVersion(psqlPath: string): Promise<string | null> {
   }
 }
 
-async function detectPgTools(verbose: boolean): Promise<PgInstallation[]> {
+export async function verifyNpgsqlRest(command: string): Promise<string | null> {
+  try {
+    const parts = command.trim().split(/\s+/);
+    const result = await $`${parts} --version --json`.quiet().nothrow();
+    if (result.exitCode !== 0) return null;
+    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
+    return json.versions?.NpgsqlRest ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function detectPgTools(verbose: boolean): Promise<PgInstallation[]> {
   const found: PgInstallation[] = [];
   const seen = new Set<string>();
 
@@ -131,7 +141,7 @@ async function detectPgTools(verbose: boolean): Promise<PgInstallation[]> {
     seen.add(psqlPath);
 
     if (verbose) logCommand([psqlPath, "--version"]);
-    const version = await tryPsqlVersion(psqlPath);
+    const version = await verifyPgTool(psqlPath);
     if (version) {
       found.push({ binDir, version, source });
     }
@@ -139,7 +149,7 @@ async function detectPgTools(verbose: boolean): Promise<PgInstallation[]> {
 
   // 1. Check bare psql on PATH first
   if (verbose) logCommand(["psql", "--version"]);
-  const pathVersion = await tryPsqlVersion("psql");
+  const pathVersion = await verifyPgTool("psql");
   if (pathVersion) {
     found.push({ binDir: null, version: pathVersion, source: "PATH (default)" });
   }
@@ -170,63 +180,4 @@ async function detectPgTools(verbose: boolean): Promise<PgInstallation[]> {
   }
 
   return found;
-}
-
-export async function detectCommand(config: PgdevConfig): Promise<void> {
-  const { verbose } = config;
-  const s = verbose ? noopSpinner() : spinner("Detecting NpgsqlRest installation...");
-
-  const result = await detectNpgsqlRest(verbose);
-
-  if (verbose) console.log();
-
-  if (result) {
-    await updateLocalConfig("tools", "npgsqlrest", result.command);
-    s.stop(success(`Found NpgsqlRest v${result.version}`));
-    console.log(pc.dim(`  Source: ${result.source}`));
-    console.log(info(`Config updated: tools.npgsqlrest = "${result.command}"`));
-  } else {
-    s.stop(error("No NpgsqlRest installation found"));
-    console.log(pc.dim(`  Run ${pc.bold("pgdev setup")} to install it.`));
-  }
-
-  // Detect PostgreSQL client tools
-  const ps = verbose ? noopSpinner() : spinner("Detecting PostgreSQL client tools...");
-  const pgInstalls = await detectPgTools(verbose);
-
-  if (verbose) console.log();
-
-  if (pgInstalls.length === 0) {
-    ps.stop(error("No PostgreSQL client tools found"));
-    console.log(pc.dim(`  Run ${pc.bold("pgdev setup")} to install them.`));
-  } else {
-    let chosen: PgInstallation;
-    if (pgInstalls.length === 1) {
-      chosen = pgInstalls[0];
-    } else {
-      ps.stop(success(`Found ${pgInstalls.length} PostgreSQL installations`));
-      const choice = await ask("Which installation should pgdev use?", pgInstalls.map((p) => ({
-        label: `v${p.version}`,
-        description: p.binDir ? `${p.source} (${p.binDir})` : p.source,
-      })), { exit: true });
-      if (choice === -1) return;
-      chosen = pgInstalls[choice];
-    }
-
-    const psqlCmd = chosen.binDir ? `${chosen.binDir}/psql` : "psql";
-    const pgDumpCmd = chosen.binDir ? `${chosen.binDir}/pg_dump` : "pg_dump";
-    const pgRestoreCmd = chosen.binDir ? `${chosen.binDir}/pg_restore` : "pg_restore";
-
-    await updateLocalConfig("tools", "psql", psqlCmd);
-    await updateLocalConfig("tools", "pg_dump", pgDumpCmd);
-    await updateLocalConfig("tools", "pg_restore", pgRestoreCmd);
-
-    if (pgInstalls.length === 1) {
-      ps.stop(success(`Found PostgreSQL client tools v${chosen.version}`));
-      console.log(pc.dim(`  Source: ${chosen.source}`));
-    }
-    console.log(info(`Config updated: tools.psql = "${psqlCmd}"`));
-    console.log(info(`Config updated: tools.pg_dump = "${pgDumpCmd}"`));
-    console.log(info(`Config updated: tools.pg_restore = "${pgRestoreCmd}"`));
-  }
 }

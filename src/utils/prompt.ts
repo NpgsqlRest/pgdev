@@ -19,26 +19,39 @@ function readKey(): string {
   return buf.subarray(0, n).toString();
 }
 
+function truncate(s: string, maxLen: number): string {
+  if (maxLen <= 0) return "";
+  if (s.length <= maxLen) return s;
+  return s.slice(0, maxLen - 1) + "…";
+}
+
 function renderOptions(options: Option[], selected: number, hint: string, helpHeight: number): void {
+  const cols = process.stdout.columns || 80;
   const maxLabel = Math.max(...options.map((o) => o.label.length));
+  const maxNumWidth = `${options.length}.`.length;
+  // Line format: "  > N. label  description" — prefix takes 5 + numWidth + maxLabel + 2
+  const descAvail = cols - 5 - maxNumWidth - maxLabel - 2;
+
   for (let i = 0; i < options.length; i++) {
     const isSelected = i === selected;
-    const num = `${i + 1}.`;
+    const num = `${i + 1}.`.padStart(maxNumWidth);
     const label = options[i].label.padEnd(maxLabel);
+    const desc = truncate(options[i].description, descAvail);
     if (isSelected) {
-      process.stdout.write(`  ${pc.cyan(">")} ${pc.cyan(num)} ${pc.bold(label)}  ${pc.dim(options[i].description)}\n`);
+      process.stdout.write(`  ${pc.cyan(">")} ${pc.cyan(num)} ${pc.bold(label)}  ${pc.dim(desc)}\n`);
     } else {
-      process.stdout.write(`    ${pc.dim(num)} ${label}  ${pc.dim(options[i].description)}\n`);
+      process.stdout.write(`    ${pc.dim(num)} ${label}  ${pc.dim(desc)}\n`);
     }
   }
   process.stdout.write(`\n  ${pc.dim(hint)}\n`);
 
   if (helpHeight > 0) {
+    const helpAvail = cols - 2;
     const helpLines = options[selected].help?.split("\n") ?? [];
     process.stdout.write("\n");
     for (let i = 0; i < helpHeight; i++) {
       if (i < helpLines.length) {
-        process.stdout.write(`  ${pc.dim(helpLines[i])}\n`);
+        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], helpAvail))}\n`);
       } else {
         process.stdout.write(`\x1B[2K\n`);
       }

@@ -3,8 +3,6 @@ import { PACKAGE_NAME } from "./constants.ts";
 import { getCurrentVersion } from "./utils/version.ts";
 import { pc } from "./utils/terminal.ts";
 import { updateCommand } from "./commands/update.ts";
-import { setupCommand } from "./commands/setup.ts";
-import { detectCommand } from "./commands/detect.ts";
 import { runCommand } from "./commands/run.ts";
 import { initCommand } from "./commands/init.ts";
 import { configCommand } from "./commands/config.ts";
@@ -85,10 +83,9 @@ ${pc.bold("Usage:")}
   ${PACKAGE_NAME} <command> [options]
 
 ${pc.bold("Commands:")}
+  init            Set up tools and initialize config files
+  setup           Alias for init
   config          Edit NpgsqlRest config files and pgdev connection
-  detect          Auto-detect installed tools and configure
-  init            Initialize config files and commands
-  setup           Set up development tools
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 
@@ -130,20 +127,18 @@ export async function run(): Promise<void> {
     case "config":
       await configCommand(config);
       break;
-    case "detect":
-      await detectCommand(config);
-      break;
     case "init":
-      await initCommand(config);
-      break;
     case "setup":
-      await setupCommand(config);
+      await initCommand(config);
       break;
     case "update":
       await updateCommand(config);
       break;
     default:
-      if (config.npgsqlrest.commands[command]) {
+      if (command === "detect") {
+        console.log(pc.dim(`  "detect" has been merged into "init". Running "init" instead.\n`));
+        await initCommand(config);
+      } else if (config.npgsqlrest.commands[command]) {
         await runCommand(config, command, args.slice(1));
       } else {
         console.error(`Unknown command: ${pc.bold(command)}\n`);

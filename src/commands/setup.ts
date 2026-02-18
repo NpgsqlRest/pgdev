@@ -1,7 +1,8 @@
 import { $ } from "bun";
-import { updateLocalConfig, type PgdevConfig } from "../config.ts";
-import { success, error, info, pc, logCommand, type Spinner } from "../utils/terminal.ts";
+import { updateConfig } from "../config.ts";
+import { success, error, info, pc, logCommand } from "../utils/terminal.ts";
 import { ask, askPath } from "../utils/prompt.ts";
+import { noopSpinner, verifyNpgsqlRest, verifyPgTool } from "../utils/tools.ts";
 
 const GITHUB_RELEASE_URL = "https://github.com/NpgsqlRest/NpgsqlRest/releases/latest/download";
 
@@ -14,18 +15,6 @@ function getBinaryAsset(): { asset: string; ext: string } | null {
   if (platform === "linux" && arch === "arm64") return { asset: "npgsqlrest-linux-arm64", ext: "" };
   if (platform === "win32" && arch === "x64") return { asset: "npgsqlrest-win64.exe", ext: ".exe" };
   return null;
-}
-
-/** No-op spinner for verbose mode — just prints the final result line */
-function noopSpinner(): Spinner {
-  return {
-    stop(finalText?: string) {
-      if (finalText) process.stderr.write(`${finalText}\n`);
-    },
-    update() {},
-    pause() {},
-    resume() {},
-  };
 }
 
 interface ExecResult {
@@ -46,9 +35,6 @@ async function exec(cmd: string[]): Promise<ExecResult> {
 }
 
 async function getBunGlobalPackageBinDir(): Promise<string> {
-  // The wrapper script (npgsqlrest.js) looks for the binary in __dirname,
-  // which is the package's bin/ directory inside node_modules.
-  // `bun pm ls -g` first line: "/path/to/global node_modules (N)"
   const result = await $`bun pm ls -g`.quiet().nothrow();
   const firstLine = result.stdout.toString().split("\n")[0];
   const globalRoot = firstLine.replace(/ node_modules.*$/, "").trim();
@@ -70,18 +56,6 @@ async function downloadBinary(dest: string): Promise<void> {
   await Bun.write(filePath, buffer);
   if (process.platform !== "win32") {
     await $`chmod +x ${filePath}`.quiet().nothrow();
-  }
-}
-
-async function verifyNpgsqlRest(command: string): Promise<string | null> {
-  try {
-    const parts = command.trim().split(/\s+/);
-    const result = await $`${parts} --version --json`.quiet().nothrow();
-    if (result.exitCode !== 0) return null;
-    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
-    return json.versions?.NpgsqlRest ?? null;
-  } catch {
-    return null;
   }
 }
 
@@ -108,7 +82,6 @@ async function installViaPackageManager(pm: "npm" | "bun", scope: "local" | "glo
   const result = await exec(installCmd);
   if (result.exitCode !== 0) {
     s.stop(error(`Failed to install NpgsqlRest via ${pm}`));
-
     process.exit(1);
   }
 
@@ -127,7 +100,7 @@ async function installViaPackageManager(pm: "npm" | "bun", scope: "local" | "glo
     }
   }
 
-  await updateLocalConfig("tools", "npgsqlrest", configValue);
+  await updateConfig("tools", "npgsqlrest", configValue);
 
   s.update("Verifying NpgsqlRest binary...");
   const version = await verifyNpgsqlRest(configValue);
@@ -186,7 +159,7 @@ async function installViaBinary(): Promise<void> {
     process.exit(1);
   }
 
-  await updateLocalConfig("tools", "npgsqlrest", dest);
+  await updateConfig("tools", "npgsqlrest", dest);
 
   const version = await verifyNpgsqlRest(dest);
   if (version) {
@@ -216,12 +189,11 @@ async function installViaDocker(): Promise<void> {
   const result = await exec(["docker", "pull", image]);
   if (result.exitCode !== 0) {
     s.stop(error(`Failed to pull ${image}`));
-
     process.exit(1);
   }
 
   const configValue = `docker run --rm ${image}`;
-  await updateLocalConfig("tools", "npgsqlrest", configValue);
+  await updateConfig("tools", "npgsqlrest", configValue);
 
   s.stop(success(`Pulled Docker image ${image}`));
   console.log(info(`Config updated: tools.npgsqlrest = "${configValue}"`));
@@ -241,20 +213,7 @@ async function detectPackageManager(): Promise<"brew" | "apt" | "apk" | "dnf" | 
   return null;
 }
 
-async function verifyPgTool(command: string): Promise<string | null> {
-  try {
-    const parts = command.trim().split(/\s+/);
-    const result = await $`${parts} --version`.quiet().nothrow();
-    if (result.exitCode !== 0) return null;
-    const output = result.stdout.toString().trim();
-    const match = output.match(/(\d+(?:\.\d+)+)/);
-    return match?.[1] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function setupPostgresTools(): Promise<void> {
+export async function setupPostgresTools(): Promise<void> {
   const pm = await detectPackageManager();
   if (!pm) {
     console.error(error("No supported package manager found (brew, apt, apk, dnf)"));
@@ -318,7 +277,6 @@ async function setupPostgresTools(): Promise<void> {
   const result = await exec(installCmd);
   if (result.exitCode !== 0) {
     s.stop(error(`Failed to install PostgreSQL client tools via ${pm}`));
-
     process.exit(1);
   }
 
@@ -333,7 +291,6 @@ async function setupPostgresTools(): Promise<void> {
       ? brewPrefixResult.stdout.toString().trim()
       : null;
 
-    // Scan known brew paths for psql
     const candidates = [
       brewPrefix ? `${brewPrefix}/bin` : null,
       `/opt/homebrew/opt/${packageDesc}/bin`,
@@ -353,9 +310,9 @@ async function setupPostgresTools(): Promise<void> {
   // Verify and update config
   const psqlVersion = await verifyPgTool(psqlCmd);
   if (psqlVersion) {
-    await updateLocalConfig("tools", "psql", psqlCmd);
-    await updateLocalConfig("tools", "pg_dump", pgDumpCmd);
-    await updateLocalConfig("tools", "pg_restore", pgRestoreCmd);
+    await updateConfig("tools", "psql", psqlCmd);
+    await updateConfig("tools", "pg_dump", pgDumpCmd);
+    await updateConfig("tools", "pg_restore", pgRestoreCmd);
     s.stop(success(`Installed PostgreSQL client tools v${psqlVersion}`));
     console.log(info(`Config updated: tools.psql = "${psqlCmd}"`));
     console.log(info(`Config updated: tools.pg_dump = "${pgDumpCmd}"`));
@@ -366,7 +323,7 @@ async function setupPostgresTools(): Promise<void> {
   }
 }
 
-async function setupNpgsqlRest(): Promise<void> {
+export async function setupNpgsqlRest(): Promise<void> {
   const method = await ask("How would you like to install NpgsqlRest?", [
     { label: "npm", description: "Install as npm package" },
     { label: "bun", description: "Install as bun package" },
@@ -396,25 +353,5 @@ async function setupNpgsqlRest(): Promise<void> {
     await installViaBinary();
   } else {
     await installViaDocker();
-  }
-}
-
-export async function setupCommand(_config: PgdevConfig): Promise<void> {
-  while (true) {
-    const tool = await ask("What would you like to set up?", [
-      { label: "npgsqlrest", description: "NpgsqlRest server" },
-      { label: "pg-tools", description: "PostgreSQL client tools (psql, pg_dump, pg_restore)" },
-    ], { exit: true });
-
-    if (tool === -1) return;
-
-    switch (tool) {
-      case 0:
-        await setupNpgsqlRest();
-        break;
-      case 1:
-        await setupPostgresTools();
-        break;
-    }
   }
 }

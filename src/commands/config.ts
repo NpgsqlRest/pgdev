@@ -1,6 +1,6 @@
 import { $ } from "bun";
 import { resolve } from "node:path";
-import { type PgdevConfig, updateLocalConfig } from "../config.ts";
+import { type PgdevConfig, updateConfig } from "../config.ts";
 import { success, error, info, pc } from "../utils/terminal.ts";
 import { ask, askConfirm, askValue } from "../utils/prompt.ts";
 import { readJsonConfig, writeJsonConfig } from "../utils/json.ts";
@@ -8,7 +8,25 @@ import { splitCommand } from "../cli.ts";
 
 // --- Key descriptions (from NpgsqlRest appsettings.json) ---
 
-const DESCRIPTIONS: Record<string, string> = {
+export const DESCRIPTIONS: Record<string, string> = {
+  "ApplicationName":
+    "The application name used to set the application name property in connection string\n" +
+    'by "NpgsqlRest.SetApplicationNameInConnection" or the "NpgsqlRest.UseJsonApplicationName" settings.\n' +
+    "It is the name of the top-level directory if set to null.",
+  "EnvironmentName":
+    "Production or Development",
+  "Urls":
+    "Specify the urls the web host will listen on.\n" +
+    "See https://learn.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.hosting.hostingabstractionswebhostbuilderextensions.useurls",
+  "StartupMessage":
+    "Logs at startup, format placeholders:\n" +
+    "{time} - startup time\n" +
+    "{urls} - listening on urls\n" +
+    "{version} - current version\n" +
+    "{environment} - EnvironmentName\n" +
+    "{application} - ApplicationName\n" +
+    "\n" +
+    "Note: This message is logged at Information level. To disable this message, set to empty string.",
   "Config":
     "Configuration settings",
   "Config.AddEnvironmentVariables":
@@ -213,6 +231,20 @@ function isSchemaBoolean(prop: SchemaProperty): boolean {
   return prop.type === "boolean" || (Array.isArray(prop.type) && prop.type.includes("boolean"));
 }
 
+function getSchemaTopLevel(schema: Record<string, unknown> | null): Record<string, SchemaProperty> {
+  if (!schema) return {};
+  const props = (schema as Record<string, Record<string, unknown>>).properties;
+  if (!props) return {};
+  const result: Record<string, SchemaProperty> = {};
+  for (const [key, value] of Object.entries(props)) {
+    const prop = value as SchemaProperty;
+    // Skip object sections (Config, ConnectionStrings, etc.) — only keep scalar top-level settings
+    if (prop.type === "object" || (Array.isArray(prop.type) && prop.type.includes("object"))) continue;
+    result[key] = prop;
+  }
+  return result;
+}
+
 // --- Connection testing ---
 
 async function testConnection(
@@ -254,6 +286,65 @@ async function testConnection(
     return { success: false, error: stderr.trim() };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- Editing: Top Level Config ---
+
+export async function editTopLevelConfig(
+  configData: Record<string, unknown>,
+  header: string,
+  filePath: string,
+  config: PgdevConfig,
+): Promise<void> {
+  const schema = await fetchConfigSchema(config);
+  const schemaProps = getSchemaTopLevel(schema);
+  const settingNames = Object.keys(schemaProps);
+
+  if (settingNames.length === 0) {
+    console.log(pc.dim("  Could not load config schema from npgsqlrest"));
+    return;
+  }
+
+  while (true) {
+    const options = settingNames.map((name) => {
+      const prop = schemaProps[name];
+      const value = configData[name] ?? prop.default;
+      const display = value === null || value === undefined ? "(not set)" : String(value);
+      return { label: name, description: display, help: DESCRIPTIONS[name] };
+    });
+
+    const choice = await ask("Top Level Config", options);
+    if (choice === -1) break;
+
+    const name = settingNames[choice];
+    const prop = schemaProps[name];
+
+    if (prop.enum) {
+      const enumChoice = await ask(name, prop.enum.map((v) => ({
+        label: v,
+        description: v === String(prop.default) ? "(default)" : "",
+      })));
+      if (enumChoice === -1) continue;
+      configData[name] = prop.enum[enumChoice];
+      console.log(success(`${name} = ${prop.enum[enumChoice]}`));
+    } else if (isSchemaBoolean(prop)) {
+      const current = configData[name] ?? prop.default;
+      configData[name] = !current;
+      console.log(success(`${name} = ${!current}`));
+    } else {
+      const current = (configData[name] as string) ?? "";
+      const value = askValue(name, current);
+      if (value) {
+        configData[name] = value;
+      } else {
+        delete configData[name];
+      }
+      console.log(success(`${name} = ${value || "(not set)"}`));
+    }
+
+    await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+    console.log(info(`Saved ${filePath}`));
   }
 }
 
@@ -454,6 +545,7 @@ async function editNpgsqlRestConfig(config: PgdevConfig): Promise<void> {
 
   while (true) {
     const section = await ask("Config section?", [
+      { label: "Top Level Config", description: "ApplicationName, Urls, EnvironmentName, StartupMessage" },
       { label: "Connection Strings", description: "Edit database connection strings" },
       { label: "Config Settings", description: "ParseEnvironmentVariables, EnvFile, etc." },
     ]);
@@ -461,6 +553,8 @@ async function editNpgsqlRestConfig(config: PgdevConfig): Promise<void> {
     if (section === -1) break;
 
     if (section === 0) {
+      await editTopLevelConfig(result.data, result.header, fullPath, config);
+    } else if (section === 1) {
       await editConnectionStrings(result.data, result.header, fullPath, config);
     } else {
       await editConfigSettings(result.data, result.header, fullPath, config);
@@ -470,10 +564,10 @@ async function editNpgsqlRestConfig(config: PgdevConfig): Promise<void> {
 
 // --- pgdev connection configuration ---
 
-async function configurePgdevConnection(config: PgdevConfig): Promise<void> {
+export async function configurePgdevConnection(config: PgdevConfig): Promise<void> {
   const choice = await ask("pgdev Database Connection", [
     { label: "Share with NpgsqlRest", description: "Read connection from a config file" },
-    { label: "Independent connection", description: "Own connection string in pgdev.local.toml" },
+    { label: "Independent connection", description: "Own connection string in pgdev.toml" },
     { label: "Test current connection", description: "" },
   ]);
 
@@ -532,9 +626,9 @@ async function configurePgdevConnection(config: PgdevConfig): Promise<void> {
       connName = connNames[connChoice];
     }
 
-    await updateLocalConfig("connection", "mode", "shared");
-    await updateLocalConfig("connection", "config_file", chosenFile.path);
-    await updateLocalConfig("connection", "connection_name", connName);
+    await updateConfig("connection", "mode", "shared");
+    await updateConfig("connection", "config_file", chosenFile.path);
+    await updateConfig("connection", "connection_name", connName);
 
     console.log();
     console.log(success("pgdev connection configured (shared)"));
@@ -563,8 +657,8 @@ async function configurePgdevConnection(config: PgdevConfig): Promise<void> {
     }
 
     const connStr = serializeConnectionString(parsed);
-    await updateLocalConfig("connection", "mode", "independent");
-    await updateLocalConfig("connection", "connection_string", connStr);
+    await updateConfig("connection", "mode", "independent");
+    await updateConfig("connection", "connection_string", connStr);
 
     console.log();
     console.log(success("pgdev connection configured (independent)"));

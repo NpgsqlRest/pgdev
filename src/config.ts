@@ -53,8 +53,8 @@ async function readToml(path: string): Promise<Record<string, unknown> | null> {
   }
 }
 
-export async function updateLocalConfig(section: string, key: string, value: string): Promise<void> {
-  const path = `${process.cwd()}/pgdev.local.toml`;
+export async function updateConfig(section: string, key: string, value: string): Promise<void> {
+  const path = `${process.cwd()}/pgdev.toml`;
   const file = Bun.file(path);
   let content = (await file.exists()) ? await file.text() : "";
 
