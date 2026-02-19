@@ -85,7 +85,7 @@ ${pc.bold("Usage:")}
 ${pc.bold("Commands:")}
   init            Set up tools and initialize config files
   setup           Alias for init
-  config          Edit NpgsqlRest config files and pgdev connection
+  config          Edit NpgsqlRest config or pgdev environment
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 

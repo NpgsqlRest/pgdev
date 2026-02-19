@@ -8,3 +8,4 @@ pgdev.local.toml
 pgdev.toml
 config
 config/local.json
+.ENV

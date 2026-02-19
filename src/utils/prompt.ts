@@ -193,6 +193,182 @@ export function askValue(
   return (input ?? "").trim() || currentValue;
 }
 
+// --- Dashboard ---
+
+export interface DashboardSection {
+  title: string;
+  items: DashboardItem[];
+}
+
+export interface DashboardItem {
+  key: string;
+  label: string;
+  value: string;
+  help?: string;
+}
+
+export interface DashboardAction {
+  key: string;
+  label: string;
+}
+
+export type DashboardResult =
+  | { type: "item"; key: string }
+  | { type: "action"; key: string };
+
+function renderDashboard(
+  sections: DashboardSection[],
+  actions: DashboardAction[],
+  allItems: DashboardItem[],
+  selected: number,
+  maxHelpLines: number,
+): void {
+  const cols = process.stdout.columns || 80;
+  const maxLabel = Math.max(...allItems.map((i) => i.label.length));
+  const maxNumWidth = `${allItems.length}.`.length;
+  const valueAvail = cols - 5 - maxNumWidth - maxLabel - 2;
+  const dividerWidth = Math.min(cols - 4, 50);
+  const divider = pc.dim("─".repeat(dividerWidth));
+
+  let itemIndex = 0;
+  for (let s = 0; s < sections.length; s++) {
+    if (s > 0) process.stdout.write("\n");
+    if (sections[s].title) {
+      process.stdout.write(`  ${pc.bold(sections[s].title)}\n`);
+      process.stdout.write(`  ${divider}\n`);
+    }
+
+    for (const item of sections[s].items) {
+      const isSelected = itemIndex === selected;
+      const num = `${itemIndex + 1}.`.padStart(maxNumWidth);
+      const label = item.label.padEnd(maxLabel);
+      const value = truncate(item.value, valueAvail);
+      if (isSelected) {
+        process.stdout.write(`  ${pc.cyan(">")} ${pc.cyan(num)} ${pc.bold(label)}  ${pc.dim(value)}\n`);
+      } else {
+        process.stdout.write(`    ${pc.dim(num)} ${label}  ${pc.dim(value)}\n`);
+      }
+      itemIndex++;
+    }
+  }
+
+  process.stdout.write("\n");
+  process.stdout.write(`  ${divider}\n`);
+  for (const action of actions) {
+    process.stdout.write(`   ${pc.cyan(action.key)}  ${action.label}\n`);
+  }
+
+  if (maxHelpLines > 0) {
+    process.stdout.write("\n");
+    process.stdout.write(`  ${divider}\n`);
+    const helpLines = allItems[selected]?.help?.split("\n") ?? [];
+    for (let i = 0; i < maxHelpLines; i++) {
+      if (i < helpLines.length) {
+        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], cols - 2))}\n`);
+      } else {
+        process.stdout.write(`\x1B[2K\n`);
+      }
+    }
+  }
+}
+
+function getDashboardHeight(sections: DashboardSection[], actions: DashboardAction[], maxHelpLines: number): number {
+  let height = 0;
+  for (let s = 0; s < sections.length; s++) {
+    if (s > 0) height++;
+    if (sections[s].title) height += 2;
+    height += sections[s].items.length;
+  }
+  height += 2;
+  height += actions.length;
+  if (maxHelpLines > 0) {
+    height += 2;
+    height += maxHelpLines;
+  }
+  return height;
+}
+
+export async function askDashboard(
+  title: string,
+  sections: DashboardSection[],
+  actions: DashboardAction[],
+  opts?: { selected?: string },
+): Promise<DashboardResult | null> {
+  const allItems = sections.flatMap((s) => s.items);
+  if (allItems.length === 0) return null;
+
+  const actionKeys = new Map(actions.map((a) => [a.key.toLowerCase(), a.key]));
+  const maxHelpLines = Math.max(0, ...allItems.map((i) => (i.help ? i.help.split("\n").length : 0)));
+  const bodyHeight = getDashboardHeight(sections, actions, maxHelpLines);
+  const titleHeight = 3;
+  const totalHeight = titleHeight + bodyHeight;
+
+  let selected = 0;
+  if (opts?.selected) {
+    const idx = allItems.findIndex((i) => i.key === opts.selected);
+    if (idx >= 0) selected = idx;
+  }
+
+  console.log();
+  console.log(`  ${pc.bold(title)}`);
+  console.log();
+
+  renderDashboard(sections, actions, allItems, selected, maxHelpLines);
+
+  if (!process.stdin.isTTY) {
+    while (true) {
+      const input = prompt(pc.dim(">"));
+      if (input === null) return null;
+      const trimmed = input.trim().toLowerCase();
+      if (actionKeys.has(trimmed)) return { type: "action", key: actionKeys.get(trimmed)! };
+      const n = parseInt(trimmed, 10);
+      if (n >= 1 && n <= allItems.length) return { type: "item", key: allItems[n - 1].key };
+    }
+  }
+
+  process.stdin.setRawMode(true);
+  try {
+    while (true) {
+      const key = readKey();
+
+      if (key === "\x1B[A" || key === "\x1BOA") {
+        if (selected > 0) {
+          selected--;
+          clearLines(bodyHeight);
+          renderDashboard(sections, actions, allItems, selected, maxHelpLines);
+        }
+      } else if (key === "\x1B[B" || key === "\x1BOB") {
+        if (selected < allItems.length - 1) {
+          selected++;
+          clearLines(bodyHeight);
+          renderDashboard(sections, actions, allItems, selected, maxHelpLines);
+        }
+      } else if (key === "\r" || key === "\n") {
+        return { type: "item", key: allItems[selected].key };
+      } else if (key === "\x1B" || key === "\x7F" || key === "\x08") {
+        return null;
+      } else if (key === "\x03") {
+        process.exit(0);
+      } else {
+        const lower = key.toLowerCase();
+        if (actionKeys.has(lower)) {
+          return { type: "action", key: actionKeys.get(lower)! };
+        }
+        const n = parseInt(key, 10);
+        if (n >= 1 && n <= allItems.length) {
+          selected = n - 1;
+          clearLines(bodyHeight);
+          renderDashboard(sections, actions, allItems, selected, maxHelpLines);
+          return { type: "item", key: allItems[n - 1].key };
+        }
+      }
+    }
+  } finally {
+    process.stdin.setRawMode(false);
+    clearLines(totalHeight);
+  }
+}
+
 export function askPath(question: string, defaultPath: string): string {
   console.log();
   console.log(`  ${pc.bold(question)}`);

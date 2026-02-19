@@ -224,37 +224,31 @@ export async function setupPostgresTools(): Promise<void> {
   let packageDesc: string;
 
   if (pm === "brew") {
-    const brewChoice = await ask("What would you like to install?", [
-      { label: "libpq", description: "Client tools only — psql, pg_dump, pg_restore (~7 MB, latest version)" },
-      { label: "postgresql", description: "Full PostgreSQL server + client tools (~19 MB, pick version)" },
+    const choice = await ask("How would you like to install PostgreSQL tools?", [
+      { label: "brew install libpq", description: "Client tools only — psql, pg_dump, pg_restore (~7 MB)" },
+      { label: "brew install postgresql@18", description: "Full PostgreSQL 18 server + client" },
+      { label: "brew install postgresql@17", description: "Full PostgreSQL 17 server + client" },
+      { label: "brew install postgresql@16", description: "Full PostgreSQL 16 server + client" },
+      { label: "brew install postgresql@15", description: "Full PostgreSQL 15 server + client" },
     ]);
-    if (brewChoice === -1) return;
-    if (brewChoice === 0) {
+    if (choice === -1) return;
+    if (choice === 0) {
       installCmd = ["brew", "install", "libpq"];
       packageDesc = "libpq";
     } else {
-      const versionChoice = await ask("Which PostgreSQL version?", [
-        { label: "18", description: "Latest (PostgreSQL 18)" },
-        { label: "17", description: "PostgreSQL 17" },
-        { label: "16", description: "PostgreSQL 16" },
-        { label: "15", description: "PostgreSQL 15" },
-      ]);
-      if (versionChoice === -1) return;
       const versions = ["18", "17", "16", "15"];
-      const version = versions[versionChoice];
+      const version = versions[choice - 1];
       installCmd = ["brew", "install", `postgresql@${version}`];
       packageDesc = `postgresql@${version}`;
     }
   } else {
-    const versionChoice = await ask("Which PostgreSQL version?", [
-      { label: "18", description: "Latest (PostgreSQL 18)" },
-      { label: "17", description: "PostgreSQL 17" },
-      { label: "16", description: "PostgreSQL 16" },
-      { label: "15", description: "PostgreSQL 15" },
-    ]);
-    if (versionChoice === -1) return;
     const versions = ["18", "17", "16", "15"];
-    const version = versions[versionChoice];
+    const choice = await ask(`Install PostgreSQL client tools via ${pm}?`, versions.map((v, i) => ({
+      label: `PostgreSQL ${v}`,
+      description: i === 0 ? "Latest" : "",
+    })));
+    if (choice === -1) return;
+    const version = versions[choice];
 
     switch (pm) {
       case "apt":
@@ -324,32 +318,24 @@ export async function setupPostgresTools(): Promise<void> {
 }
 
 export async function setupNpgsqlRest(): Promise<void> {
-  const method = await ask("How would you like to install NpgsqlRest?", [
-    { label: "npm", description: "Install as npm package" },
-    { label: "bun", description: "Install as bun package" },
-    { label: "binary", description: "Download standalone executable" },
-    { label: "docker", description: "Pull Docker image" },
+  const choice = await ask("How would you like to install NpgsqlRest?", [
+    { label: "npm (local, devDependency)", description: "npm install -D npgsqlrest" },
+    { label: "npm (local, dependency)", description: "npm install npgsqlrest" },
+    { label: "npm (global)", description: "npm install -g npgsqlrest" },
+    { label: "bun (local, devDependency)", description: "bun add -D npgsqlrest" },
+    { label: "bun (local, dependency)", description: "bun add npgsqlrest" },
+    { label: "bun (global)", description: "bun add -g npgsqlrest" },
+    { label: "Binary download", description: "Download standalone executable" },
+    { label: "Docker", description: "Pull Docker image" },
   ]);
-  if (method === -1) return;
+  if (choice === -1) return;
 
-  if (method <= 1) {
-    const pm = method === 0 ? "npm" : "bun" as const;
-    const scope = await ask("Install scope?", [
-      { label: "local", description: "Project dependency (node_modules/.bin/)" },
-      { label: "global", description: "System-wide installation" },
-    ]);
-    if (scope === -1) return;
-    let dev = false;
-    if (scope === 0) {
-      const depType = await ask("Dependency type?", [
-        { label: "dependencies", description: "Production dependency" },
-        { label: "devDependencies", description: "Development only (-D)" },
-      ]);
-      if (depType === -1) return;
-      dev = depType === 1;
-    }
-    await installViaPackageManager(pm, scope === 0 ? "local" : "global", dev);
-  } else if (method === 2) {
+  if (choice <= 5) {
+    const pm: "npm" | "bun" = choice <= 2 ? "npm" : "bun";
+    const scope: "local" | "global" = choice % 3 === 2 ? "global" : "local";
+    const dev = choice % 3 === 0;
+    await installViaPackageManager(pm, scope, dev);
+  } else if (choice === 6) {
     await installViaBinary();
   } else {
     await installViaDocker();

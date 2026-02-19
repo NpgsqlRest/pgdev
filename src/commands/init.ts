@@ -1,14 +1,77 @@
 import { loadConfig, serializeToml, updateConfig, type PgdevConfig } from "../config.ts";
 import { spinner, success, error, info, pc } from "../utils/terminal.ts";
-import { ask, askConfirm, askPath } from "../utils/prompt.ts";
+import { ask, askConfirm, askPath, askDashboard } from "../utils/prompt.ts";
 import { readJsonConfig } from "../utils/json.ts";
-import { editTopLevelConfig, configurePgdevConnection } from "./config.ts";
+import { editTopLevelConfig, editPgdevEnvironment, environmentStatus } from "./config.ts";
 import { setupNpgsqlRest, setupPostgresTools } from "./setup.ts";
 import { detectNpgsqlRest, detectPgTools, type PgInstallation } from "../utils/tools.ts";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
-// --- Tool setup (merged detect + setup) ---
+// --- Status helpers ---
+
+function toolStatus(value: string, defaultValue: string): string {
+  if (!value) return "not configured";
+  return value === defaultValue ? `default (${value})` : value;
+}
+
+function configFilesStatus(config: PgdevConfig): string {
+  const commands = Object.values(config.npgsqlrest.commands);
+  if (commands.length === 0) return "not initialized";
+  const files = new Set<string>();
+  for (const cmd of commands) {
+    for (const token of cmd.trim().split(/\s+/)) {
+      if (token.endsWith(".json") && !token.startsWith("--")) {
+        files.add(token.split("/").pop()!);
+      }
+    }
+  }
+  if (files.size === 0) return "not initialized";
+  return `${files.size} file${files.size > 1 ? "s" : ""} (${[...files].join(", ")})`;
+}
+
+// --- Dashboard builder ---
+
+function buildInitDashboard(config: PgdevConfig) {
+  return [
+    {
+      title: "Tools",
+      items: [
+        {
+          key: "npgsqlrest",
+          label: "NpgsqlRest",
+          value: toolStatus(config.tools.npgsqlrest, "npgsqlrest"),
+          help: "REST API server for PostgreSQL functions and procedures.\nSelect to detect installation or install.",
+        },
+        {
+          key: "pgtools",
+          label: "PostgreSQL tools",
+          value: toolStatus(config.tools.psql, "psql"),
+          help: "psql, pg_dump, pg_restore — PostgreSQL client tools.\nSelect to detect installation or install.",
+        },
+      ],
+    },
+    {
+      title: "Configuration",
+      items: [
+        {
+          key: "config",
+          label: "NpgsqlRest config",
+          value: configFilesStatus(config),
+          help: "Create NpgsqlRest config files (production.json, development.json, etc.)\nand pgdev.toml commands (dev, serve, validate).",
+        },
+        {
+          key: "environment",
+          label: "pgdev environment",
+          value: environmentStatus(config),
+          help: "Env file and database connection for pgdev tools.",
+        },
+      ],
+    },
+  ];
+}
+
+// --- Tool handlers ---
 
 async function savePgTools(chosen: PgInstallation): Promise<void> {
   const psqlCmd = chosen.binDir ? `${chosen.binDir}/psql` : "psql";
@@ -24,31 +87,25 @@ async function savePgTools(chosen: PgInstallation): Promise<void> {
   console.log(info(`Config updated: tools.pg_restore = "${pgRestoreCmd}"`));
 }
 
-async function setupTools(_config: PgdevConfig): Promise<{ npgsqlrest: boolean; pgtools: boolean }> {
-  let npgsqlrestConfigured = false;
-  let pgtoolsConfigured = false;
-
-  // === NpgsqlRest Detection + Setup ===
+async function handleNpgsqlRest(): Promise<void> {
   const s = spinner("Detecting NpgsqlRest installation...");
-  const npgsqlResult = await detectNpgsqlRest(false);
+  const result = await detectNpgsqlRest(false);
 
-  if (npgsqlResult) {
-    s.stop(success(`Found NpgsqlRest v${npgsqlResult.version}`));
-    console.log(pc.dim(`  Source: ${npgsqlResult.source}`));
+  if (result) {
+    s.stop(success(`Found NpgsqlRest v${result.version}`));
+    console.log(pc.dim(`  Source: ${result.source}`));
 
     const choice = await ask("Use this installation?", [
-      { label: `Use ${npgsqlResult.command}`, description: `v${npgsqlResult.version}` },
+      { label: `Use ${result.command}`, description: `v${result.version}` },
       { label: "Set up differently", description: "Install via npm, bun, binary, or docker" },
       { label: "Skip", description: "Don't configure NpgsqlRest now" },
     ]);
 
     if (choice === 0) {
-      await updateConfig("tools", "npgsqlrest", npgsqlResult.command);
-      console.log(info(`Config updated: tools.npgsqlrest = "${npgsqlResult.command}"`));
-      npgsqlrestConfigured = true;
+      await updateConfig("tools", "npgsqlrest", result.command);
+      console.log(info(`Config updated: tools.npgsqlrest = "${result.command}"`));
     } else if (choice === 1) {
       await setupNpgsqlRest();
-      npgsqlrestConfigured = true;
     }
   } else {
     s.stop(error("No NpgsqlRest installation found"));
@@ -60,16 +117,16 @@ async function setupTools(_config: PgdevConfig): Promise<{ npgsqlrest: boolean; 
 
     if (choice === 0) {
       await setupNpgsqlRest();
-      npgsqlrestConfigured = true;
     }
   }
+}
 
-  // === PostgreSQL Tools Detection + Setup ===
-  const ps = spinner("Detecting PostgreSQL client tools...");
+async function handlePgTools(): Promise<void> {
+  const s = spinner("Detecting PostgreSQL client tools...");
   const pgInstalls = await detectPgTools(false);
 
   if (pgInstalls.length === 0) {
-    ps.stop(error("No PostgreSQL client tools found"));
+    s.stop(error("No PostgreSQL client tools found"));
 
     const choice = await ask("What would you like to do?", [
       { label: "Install now", description: "Set up PostgreSQL client tools" },
@@ -78,11 +135,10 @@ async function setupTools(_config: PgdevConfig): Promise<{ npgsqlrest: boolean; 
 
     if (choice === 0) {
       await setupPostgresTools();
-      pgtoolsConfigured = true;
     }
   } else if (pgInstalls.length === 1) {
     const chosen = pgInstalls[0];
-    ps.stop(success(`Found PostgreSQL client tools v${chosen.version}`));
+    s.stop(success(`Found PostgreSQL client tools v${chosen.version}`));
     console.log(pc.dim(`  Source: ${chosen.source}`));
 
     const choice = await ask("Use this installation?", [
@@ -93,13 +149,11 @@ async function setupTools(_config: PgdevConfig): Promise<{ npgsqlrest: boolean; 
 
     if (choice === 0) {
       await savePgTools(chosen);
-      pgtoolsConfigured = true;
     } else if (choice === 1) {
       await setupPostgresTools();
-      pgtoolsConfigured = true;
     }
   } else {
-    ps.stop(success(`Found ${pgInstalls.length} PostgreSQL installations`));
+    s.stop(success(`Found ${pgInstalls.length} PostgreSQL installations`));
 
     const options = pgInstalls.map((p) => ({
       label: `v${p.version}`,
@@ -112,14 +166,10 @@ async function setupTools(_config: PgdevConfig): Promise<{ npgsqlrest: boolean; 
 
     if (choice >= 0 && choice < pgInstalls.length) {
       await savePgTools(pgInstalls[choice]);
-      pgtoolsConfigured = true;
     } else if (choice === pgInstalls.length) {
       await setupPostgresTools();
-      pgtoolsConfigured = true;
     }
   }
-
-  return { npgsqlrest: npgsqlrestConfigured, pgtools: pgtoolsConfigured };
 }
 
 // --- NpgsqlRest config file initialization ---
@@ -373,34 +423,84 @@ async function initNpgsqlRest(config: PgdevConfig): Promise<void> {
 
 // --- Main entry ---
 
+async function ensureConfigFile(): Promise<boolean> {
+  const path = `${process.cwd()}/pgdev.toml`;
+  if (await Bun.file(path).exists()) return false;
+
+  const envFileExists = await Bun.file(`${process.cwd()}/.ENV`).exists();
+  const envFileValue = envFileExists ? ".ENV" : "";
+
+  const content = `# Environment file for {ENV_VAR} placeholder resolution
+env_file = "${envFileValue}"
+
+# Tool paths (bare name = on PATH, or full path)
+[tools]
+npgsqlrest = "npgsqlrest"
+psql = "psql"
+pg_dump = "pg_dump"
+pg_restore = "pg_restore"
+
+# NpgsqlRest commands: key = config file args passed to npgsqlrest
+[npgsqlrest.commands]
+dev = ""
+validate = ""
+serve = ""
+validate-prod = ""
+
+# Database connection for pgdev tools ({ENV_VAR} placeholders resolved via env_file)
+[connection]
+host = "{PGHOST}"
+port = "{PGPORT}"
+database = "{PGDATABASE}"
+username = "{PGUSER}"
+password = "{PGPASSWORD}"
+`;
+
+  await Bun.write(path, content);
+  console.log(success("Created pgdev.toml with default settings"));
+  return true;
+}
+
 export async function initCommand(config: PgdevConfig): Promise<void> {
+  const created = await ensureConfigFile();
+  let currentConfig = created ? await loadConfig() : config;
+  let lastSelected: string | undefined;
+
   while (true) {
-    const choice = await ask("What would you like to do?", [
-      { label: "Set up tools", description: "Detect and install NpgsqlRest and PostgreSQL tools" },
-      { label: "NpgsqlRest config", description: "Create config files and commands" },
-    ], { exit: true });
+    const sections = buildInitDashboard(currentConfig);
+    const actions = [
+      { key: "d", label: "Detect all tools" },
+      { key: "q", label: "Quit" },
+    ];
 
-    if (choice === -1) return;
+    const choice = await askDashboard("pgdev init", sections, actions, { selected: lastSelected });
 
-    if (choice === 0) {
-      const result = await setupTools(config);
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      break;
+    }
 
-      // Reload config to pick up freshly-saved tool paths
-      const freshConfig = await loadConfig();
+    if (choice.type === "action" && choice.key === "d") {
+      await handleNpgsqlRest();
+      await handlePgTools();
+      currentConfig = await loadConfig();
+      lastSelected = undefined;
+      continue;
+    }
 
-      if (result.pgtools) {
-        if (askConfirm("Configure database connection now?")) {
-          await configurePgdevConnection(freshConfig);
-        }
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+
+      if (choice.key === "npgsqlrest") {
+        await handleNpgsqlRest();
+      } else if (choice.key === "pgtools") {
+        await handlePgTools();
+      } else if (choice.key === "config") {
+        await initNpgsqlRest(currentConfig);
+      } else if (choice.key === "environment") {
+        await editPgdevEnvironment(currentConfig);
       }
 
-      if (result.npgsqlrest) {
-        if (askConfirm("Initialize NpgsqlRest config files now?")) {
-          await initNpgsqlRest(freshConfig);
-        }
-      }
-    } else if (choice === 1) {
-      await initNpgsqlRest(config);
+      currentConfig = await loadConfig();
     }
   }
 }

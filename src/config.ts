@@ -5,13 +5,21 @@ export interface NpgsqlRestConfig {
 }
 
 export interface ConnectionConfig {
-  mode: "shared" | "independent";
   config_file?: string;
   connection_name?: string;
-  connection_string?: string;
+  host?: string;
+  port?: string;
+  database?: string;
+  username?: string;
+  password?: string;
+}
+
+export function isSharedConnection(conn: ConnectionConfig): boolean {
+  return !!conn.config_file;
 }
 
 export interface PgdevConfig {
+  env_file?: string;
   tools: {
     npgsqlrest: string;
     psql: string;
@@ -34,7 +42,6 @@ const defaults: PgdevConfig = {
     commands: {},
   },
   connection: {
-    mode: "shared",
     connection_name: "Default",
   },
   verbose: false,
@@ -58,33 +65,80 @@ export async function updateConfig(section: string, key: string, value: string):
   const file = Bun.file(path);
   let content = (await file.exists()) ? await file.text() : "";
 
-  const sectionHeader = `[${section}]`;
   const newLine = `${key} = "${value}"`;
   const keyPattern = new RegExp(`^${key}\\s*=.*$`, "m");
 
-  const sectionIndex = content.indexOf(sectionHeader);
-  if (sectionIndex !== -1) {
-    // Section exists — find the range of this section
+  if (!section) {
+    // Top-level key (no section header)
+    // Find top-level region: everything before the first [section] header
+    const firstSectionMatch = content.match(/^\[/m);
+    const topLevelEnd = firstSectionMatch?.index ?? content.length;
+    const topLevel = content.slice(0, topLevelEnd);
+
+    if (keyPattern.test(topLevel)) {
+      const updated = topLevel.replace(keyPattern, newLine);
+      content = updated + content.slice(topLevelEnd);
+    } else {
+      // Insert at end of top-level region
+      const suffix = topLevel.endsWith("\n") || topLevel === "" ? "" : "\n";
+      content = topLevel + suffix + newLine + "\n" + content.slice(topLevelEnd);
+    }
+  } else {
+    const sectionHeader = `[${section}]`;
+    const sectionIndex = content.indexOf(sectionHeader);
+    if (sectionIndex !== -1) {
+      // Section exists — find the range of this section
+      const afterSection = content.slice(sectionIndex + sectionHeader.length);
+      const nextSectionMatch = afterSection.match(/\n\[/);
+      const sectionEnd = nextSectionMatch
+        ? sectionIndex + sectionHeader.length + nextSectionMatch.index!
+        : content.length;
+      const sectionContent = content.slice(sectionIndex, sectionEnd);
+
+      if (keyPattern.test(sectionContent)) {
+        // Key exists in section — replace it
+        const updated = sectionContent.replace(keyPattern, newLine);
+        content = content.slice(0, sectionIndex) + updated + content.slice(sectionEnd);
+      } else {
+        // Key doesn't exist — append after section header
+        const insertPos = sectionIndex + sectionHeader.length;
+        content = content.slice(0, insertPos) + `\n${newLine}` + content.slice(insertPos);
+      }
+    } else {
+      // Section doesn't exist — append it
+      const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
+      content += `${suffix}\n${sectionHeader}\n${newLine}\n`;
+    }
+  }
+
+  await Bun.write(path, content);
+}
+
+export async function removeConfigKey(section: string, key: string): Promise<void> {
+  const path = `${process.cwd()}/pgdev.toml`;
+  const file = Bun.file(path);
+  if (!(await file.exists())) return;
+  let content = await file.text();
+
+  const keyPattern = new RegExp(`^${key}\\s*=.*\\n?`, "m");
+
+  if (!section) {
+    const firstSectionMatch = content.match(/^\[/m);
+    const topLevelEnd = firstSectionMatch?.index ?? content.length;
+    const topLevel = content.slice(0, topLevelEnd);
+    content = topLevel.replace(keyPattern, "") + content.slice(topLevelEnd);
+  } else {
+    const sectionHeader = `[${section}]`;
+    const sectionIndex = content.indexOf(sectionHeader);
+    if (sectionIndex === -1) return;
     const afterSection = content.slice(sectionIndex + sectionHeader.length);
     const nextSectionMatch = afterSection.match(/\n\[/);
     const sectionEnd = nextSectionMatch
       ? sectionIndex + sectionHeader.length + nextSectionMatch.index!
       : content.length;
     const sectionContent = content.slice(sectionIndex, sectionEnd);
-
-    if (keyPattern.test(sectionContent)) {
-      // Key exists in section — replace it
-      const updated = sectionContent.replace(keyPattern, newLine);
-      content = content.slice(0, sectionIndex) + updated + content.slice(sectionEnd);
-    } else {
-      // Key doesn't exist — append after section header
-      const insertPos = sectionIndex + sectionHeader.length;
-      content = content.slice(0, insertPos) + `\n${newLine}` + content.slice(insertPos);
-    }
-  } else {
-    // Section doesn't exist — append it
-    const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
-    content += `${suffix}\n${sectionHeader}\n${newLine}\n`;
+    const updated = sectionContent.replace(keyPattern, "");
+    content = content.slice(0, sectionIndex) + updated + content.slice(sectionEnd);
   }
 
   await Bun.write(path, content);
