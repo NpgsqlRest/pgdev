@@ -1,8 +1,8 @@
 import { $ } from "bun";
 import { statSync, readdirSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import { loadConfig, type PgdevConfig, updateConfig, updateConfigArraySync, removeConfigKey, isSharedConnection } from "../config.ts";
-import { success, error, info, pc, formatCmd, spinner } from "../utils/terminal.ts";
+import { success, error, pc, formatCmd, spinner } from "../utils/terminal.ts";
 import { ask, askConfirm, askValue, askPath, askDashboard, askMultiSelect } from "../utils/prompt.ts";
 import { readJsonConfig, writeJsonConfig } from "../utils/json.ts";
 import { splitCommand } from "../cli.ts";
@@ -86,7 +86,7 @@ function configFilesStatus(config: PgdevConfig): string {
 
 // --- Tool handlers ---
 
-async function savePgTools(chosen: PgInstallation): Promise<void> {
+async function savePgTools(chosen: PgInstallation): Promise<string> {
   const psqlCmd = chosen.binDir ? `${chosen.binDir}/psql` : "psql";
   const pgDumpCmd = chosen.binDir ? `${chosen.binDir}/pg_dump` : "pg_dump";
   const pgRestoreCmd = chosen.binDir ? `${chosen.binDir}/pg_restore` : "pg_restore";
@@ -95,12 +95,10 @@ async function savePgTools(chosen: PgInstallation): Promise<void> {
   await updateConfig("tools", "pg_dump", pgDumpCmd);
   await updateConfig("tools", "pg_restore", pgRestoreCmd);
 
-  console.log(info(`Config updated: tools.psql = "${psqlCmd}"`));
-  console.log(info(`Config updated: tools.pg_dump = "${pgDumpCmd}"`));
-  console.log(info(`Config updated: tools.pg_restore = "${pgRestoreCmd}"`));
+  return `tools.psql = "${psqlCmd}"\ntools.pg_dump = "${pgDumpCmd}"\ntools.pg_restore = "${pgRestoreCmd}"`;
 }
 
-async function handleNpgsqlRest(): Promise<void> {
+async function handleNpgsqlRest(): Promise<string | undefined> {
   const s = spinner("Detecting NpgsqlRest installation...");
   const result = await detectNpgsqlRest(false);
 
@@ -116,7 +114,7 @@ async function handleNpgsqlRest(): Promise<void> {
 
     if (choice === 0) {
       await updateConfig("tools", "npgsqlrest", result.command);
-      console.log(info(`Config updated: tools.npgsqlrest = "${result.command}"`));
+      return `tools.npgsqlrest = "${result.command}"`;
     } else if (choice === 1) {
       await setupNpgsqlRest();
     }
@@ -132,9 +130,10 @@ async function handleNpgsqlRest(): Promise<void> {
       await setupNpgsqlRest();
     }
   }
+  return undefined;
 }
 
-async function handlePgTools(): Promise<void> {
+async function handlePgTools(): Promise<string | undefined> {
   const s = spinner("Detecting PostgreSQL client tools...");
   const pgInstalls = await detectPgTools(false);
 
@@ -149,6 +148,7 @@ async function handlePgTools(): Promise<void> {
     if (choice === 0) {
       await setupPostgresTools();
     }
+    return undefined;
   } else if (pgInstalls.length === 1) {
     const chosen = pgInstalls[0];
     s.stop(success(`Found PostgreSQL client tools v${chosen.version}`));
@@ -161,7 +161,7 @@ async function handlePgTools(): Promise<void> {
     ]);
 
     if (choice === 0) {
-      await savePgTools(chosen);
+      return await savePgTools(chosen);
     } else if (choice === 1) {
       await setupPostgresTools();
     }
@@ -178,11 +178,12 @@ async function handlePgTools(): Promise<void> {
     const choice = await ask("Which installation should pgdev use?", options);
 
     if (choice >= 0 && choice < pgInstalls.length) {
-      await savePgTools(pgInstalls[choice]);
+      return await savePgTools(pgInstalls[choice]);
     } else if (choice === pgInstalls.length) {
       await setupPostgresTools();
     }
   }
+  return undefined;
 }
 
 // --- Tools Setup dashboard ---
@@ -190,6 +191,7 @@ async function handlePgTools(): Promise<void> {
 async function editToolsSetup(config: PgdevConfig): Promise<void> {
   let currentConfig = config;
   let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
 
   while (true) {
     const sections = [
@@ -208,6 +210,12 @@ async function editToolsSetup(config: PgdevConfig): Promise<void> {
             value: toolStatus(currentConfig.tools.psql, "psql"),
             help: "psql, pg_dump, pg_restore — PostgreSQL client tools.\nSelect to detect installation or install.",
           },
+          {
+            key: "configfiles",
+            label: "NpgsqlRest Config Files",
+            value: configFilesStatus(currentConfig),
+            help: "Setup NpgsqlRest JSON config files (production, development, local).\nSelect to create or change config file paths.",
+          },
         ],
       },
     ];
@@ -216,13 +224,15 @@ async function editToolsSetup(config: PgdevConfig): Promise<void> {
       { key: "q", label: "Back" },
     ];
 
-    const choice = await askDashboard("Tools Setup", sections, actions, { selected: lastSelected });
+    const choice = await askDashboard("Tools Setup", sections, actions, { selected: lastSelected, status: lastStatus });
+    lastStatus = undefined;
 
     if (choice === null || (choice.type === "action" && choice.key === "q")) break;
 
     if (choice.type === "action" && choice.key === "d") {
-      await handleNpgsqlRest();
-      await handlePgTools();
+      const nStatus = await handleNpgsqlRest();
+      const pStatus = await handlePgTools();
+      lastStatus = [nStatus, pStatus].filter(Boolean).join("\n") || undefined;
       currentConfig = await loadConfig();
       lastSelected = undefined;
       continue;
@@ -231,9 +241,11 @@ async function editToolsSetup(config: PgdevConfig): Promise<void> {
     if (choice.type === "item") {
       lastSelected = choice.key;
       if (choice.key === "npgsqlrest") {
-        await handleNpgsqlRest();
+        lastStatus = await handleNpgsqlRest();
       } else if (choice.key === "pgtools") {
-        await handlePgTools();
+        lastStatus = await handlePgTools();
+      } else if (choice.key === "configfiles") {
+        await handleConfigFiles(currentConfig);
       }
       currentConfig = await loadConfig();
     }
@@ -273,131 +285,131 @@ const CONFIG_FILES = {
   },
 } as const;
 
-async function writeIfConfirmed(path: string, content: string, description?: string): Promise<boolean> {
-  if (await Bun.file(path).exists()) {
-    if (!askConfirm(`${path} already exists. Overwrite?`)) {
-      console.log(pc.dim(`  Skipped ${path}`));
-      return false;
+
+
+function parseCommandFiles(config: PgdevConfig): { production: string; development: string; local: string } {
+  const devCmd = config.npgsqlrest.commands.dev || "";
+  if (!devCmd) return { production: "", development: "", local: "" };
+  const files = extractConfigFiles(devCmd);
+  const prod = files.find((f) => !f.optional)?.path ?? "";
+  const optionals = files.filter((f) => f.optional);
+  return { production: prod, development: optionals[0]?.path ?? "", local: optionals[1]?.path ?? "" };
+}
+
+type ConfigRole = "production" | "development" | "local";
+
+const CONFIG_ROLE_META: Record<ConfigRole, { label: string; defaultPath: string; description: string; help: string; gitignore: boolean }> = {
+  production: { label: "Production", defaultPath: "./config/production.json", description: CONFIG_FILES.production.description, help: "Base configuration for all environments.", gitignore: false },
+  development: { label: "Development", defaultPath: "./config/development.json", description: CONFIG_FILES.development.description, help: "Development overrides (optional, layered on production).", gitignore: false },
+  local: { label: "Local", defaultPath: "./config/local.json", description: CONFIG_FILES.local.description, help: "Personal overrides, not committed to git (optional).", gitignore: true },
+};
+
+const CONFIG_ROLE_ORDER: ConfigRole[] = ["production", "development", "local"];
+
+async function saveConfigCommands(files: { production: string; development: string; local: string }): Promise<void> {
+  if (!files.production) {
+    // Clear all commands
+    for (const name of ["dev", "serve", "validate", "validate-prod"]) {
+      await updateConfig("npgsqlrest.commands", name, "");
     }
-  }
-  await Bun.write(path, content);
-  const desc = description ? `  ${pc.dim(description)}` : "";
-  console.log(success(`Created ${path}`) + desc);
-  return true;
-}
-
-async function appendToGitignore(entry: string): Promise<void> {
-  const path = `${process.cwd()}/.gitignore`;
-  const file = Bun.file(path);
-  let content = (await file.exists()) ? await file.text() : "";
-
-  if (content.split("\n").some((line) => line.trim() === entry)) return;
-
-  const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
-  await Bun.write(path, content + suffix + entry + "\n");
-  console.log(info(`Added ${entry} to .gitignore`));
-}
-
-async function mergeTomlCommands(
-  commands: Record<string, string>,
-): Promise<void> {
-  console.log();
-  console.log(`  ${pc.bold("pgdev.toml")} — the following commands will be set:`);
-  console.log();
-  console.log(pc.dim(`  [npgsqlrest.commands]`));
-  for (const [name, value] of Object.entries(commands)) {
-    console.log(pc.dim(`  ${name} = "${value}"`));
-  }
-  console.log();
-
-  if (!askConfirm("Update pgdev.toml with these commands?", true)) {
-    console.log(pc.dim(`  Skipped pgdev.toml`));
     return;
   }
 
-  for (const [name, value] of Object.entries(commands)) {
-    await updateConfig("npgsqlrest.commands", name, value);
-  }
+  let dev = files.production;
+  if (files.development) dev += ` --optional ${files.development}`;
+  if (files.local) dev += ` --optional ${files.local}`;
 
-  console.log(success(`Updated pgdev.toml`));
+  await updateConfig("npgsqlrest.commands", "dev", dev);
+  await updateConfig("npgsqlrest.commands", "serve", files.production);
+  await updateConfig("npgsqlrest.commands", "validate", dev + " --validate");
+  await updateConfig("npgsqlrest.commands", "validate-prod", files.production + " --validate");
 }
 
-async function initNpgsqlRest(): Promise<void> {
-  const configDir = askPath("Config directory", "./config");
+async function ensureConfigFile(filePath: string, role: ConfigRole): Promise<string> {
+  const meta = CONFIG_ROLE_META[role];
+  const dir = dirname(filePath);
+  if (dir && dir !== ".") mkdirSync(dir, { recursive: true });
 
-  const structureChoice = await ask("Config file structure?", [
-    { label: "Single file", description: "One appsettings.json" },
-    { label: "Dev + Prod", description: "Separate development and production configs" },
-    { label: "Dev + Prod + Local", description: "Plus personal overrides, gitignored (recommended)" },
-  ]);
-  if (structureChoice === -1) return;
-
-  // Create config directory if needed
-  if (configDir !== ".") {
-    const dir = `${process.cwd()}/${configDir}`;
-    mkdirSync(dir, { recursive: true });
+  const msgs: string[] = [];
+  const file = Bun.file(filePath);
+  if (!(await file.exists())) {
+    await Bun.write(filePath, configHeader(meta.description) + "{}\n");
+    msgs.push(`Created ${filePath}`);
   }
-
-  const prefix = configDir === "." ? "" : `${configDir}/`;
-  const { appsettings, development, production, local } = CONFIG_FILES;
-
-  // Create config files
-  console.log();
-
-  const commands: Record<string, string> = {};
-
-  // Helper to build path with prefix for commands
-  const p = (file: string) => `./${prefix}${file}`;
-
-  if (structureChoice === 0) {
-    // Single file
-    await writeIfConfirmed(
-      `${prefix}${appsettings.file}`,
-      configHeader(appsettings.description) + "{}\n",
-      appsettings.description,
-    );
-    commands.dev = p("appsettings.json");
-    commands.validate = `${p("appsettings.json")} --validate`;
-  } else {
-    // Dev + Prod (with or without local)
-    await writeIfConfirmed(
-      `${prefix}${development.file}`,
-      configHeader(development.description) + "{}\n",
-      development.description,
-    );
-    await writeIfConfirmed(
-      `${prefix}${production.file}`,
-      configHeader(production.description) + "{}\n",
-      production.description,
-    );
-
-    if (structureChoice === 2) {
-      // + Local
-      await writeIfConfirmed(
-        `${prefix}${local.file}`,
-        configHeader(local.description) + "{}\n",
-        local.description,
-      );
-      await appendToGitignore(`${prefix}${local.file}`);
-      commands.dev = `${p("production.json")} --optional ${p("development.json")} --optional ${p("local.json")}`;
-      commands.validate = `${p("production.json")} --optional ${p("development.json")} --optional ${p("local.json")} --validate`;
-    } else {
-      commands.dev = `${p("production.json")} --optional ${p("development.json")}`;
-      commands.validate = `${p("production.json")} --optional ${p("development.json")} --validate`;
+  if (meta.gitignore) {
+    const gitignorePath = `${process.cwd()}/.gitignore`;
+    const gitignoreFile = Bun.file(gitignorePath);
+    let content = (await gitignoreFile.exists()) ? await gitignoreFile.text() : "";
+    if (!content.split("\n").some((line) => line.trim() === filePath)) {
+      const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
+      await Bun.write(gitignorePath, content + suffix + filePath + "\n");
+      msgs.push(`Added ${filePath} to .gitignore`);
     }
-    commands.serve = p("production.json");
-    commands["validate-prod"] = `${p("production.json")} --validate`;
   }
+  return msgs.length > 0 ? msgs.join("\n") : `Updated ${filePath}`;
+}
 
-  await mergeTomlCommands(commands);
+async function handleConfigFiles(config: PgdevConfig): Promise<void> {
+  let currentConfig = config;
+  let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
 
-  console.log();
-  console.log(success("NpgsqlRest config files initialized"));
-  if (commands.serve) {
-    console.log(pc.dim(`  Run ${pc.bold("pgdev dev")} to start with development config`));
-    console.log(pc.dim(`  Run ${pc.bold("pgdev serve")} to start with production config`));
-  } else {
-    console.log(pc.dim(`  Run ${pc.bold("pgdev dev")} to start`));
+  while (true) {
+    const files = parseCommandFiles(currentConfig);
+
+    const items: { key: string; label: string; value: string; help?: string }[] = [];
+    for (const role of CONFIG_ROLE_ORDER) {
+      if (files[role]) {
+        items.push({ key: role, label: CONFIG_ROLE_META[role].label, value: files[role], help: CONFIG_ROLE_META[role].help });
+      }
+    }
+
+    // Determine next addable role
+    const nextRole = CONFIG_ROLE_ORDER.find((r) => !files[r]);
+    if (nextRole) {
+      items.push({ key: "+new", label: "+ Add new", value: "", help: `Add ${CONFIG_ROLE_META[nextRole].label.toLowerCase()} config file.` });
+    }
+
+    const sections = [{ title: "", items }];
+    const actions = [{ key: "q", label: "Back" }];
+
+    const choice = await askDashboard("NpgsqlRest Config Files", sections, actions, { selected: lastSelected, status: lastStatus });
+    lastStatus = undefined;
+    if (choice === null || (choice.type === "action" && choice.key === "q")) break;
+
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+
+      if (choice.key === "+new" && nextRole) {
+        const meta = CONFIG_ROLE_META[nextRole];
+        const filePath = askValue(meta.label, meta.defaultPath, { path: true });
+        if (filePath) {
+          lastStatus = await ensureConfigFile(filePath, nextRole);
+          const updated = { ...files, [nextRole]: filePath };
+          await saveConfigCommands(updated);
+        }
+      } else if (choice.key in CONFIG_ROLE_META) {
+        const role = choice.key as ConfigRole;
+        const editChoice = await ask(`${CONFIG_ROLE_META[role].label} config`, [
+          { label: "Change path", description: `Currently: ${files[role]}` },
+          ...(role !== "production" ? [{ label: "Remove", description: "Remove this config file reference" }] : []),
+        ], { exit: true });
+
+        if (editChoice === 0) {
+          const newPath = askValue(CONFIG_ROLE_META[role].label, files[role], { path: true });
+          if (newPath && newPath !== files[role]) {
+            lastStatus = await ensureConfigFile(newPath, role);
+            const updated = { ...files, [role]: newPath };
+            await saveConfigCommands(updated);
+          }
+        } else if (editChoice === 1 && role !== "production") {
+          const updated = { ...files, [role]: "" };
+          await saveConfigCommands(updated);
+          lastStatus = `Removed ${files[role]}`;
+        }
+      }
+      currentConfig = await loadConfig();
+    }
   }
 }
 
@@ -613,10 +625,10 @@ interface ConnectionFields {
   password: string;
 }
 
-function resolveConnectionField(value: string, envDict: Record<string, string>): string {
+function resolveConnectionField(value: string, envDict: Record<string, string>, warnings: string[]): string {
   const { resolved, unresolved } = resolveEnvVars(value, envDict);
   if (unresolved.length > 0) {
-    console.log(pc.yellow(`  Unresolved: ${unresolved.join(", ")}`));
+    warnings.push(`Unresolved: ${unresolved.join(", ")}`);
   }
   return resolved;
 }
@@ -658,63 +670,6 @@ async function testConnectionFields(
 
 // --- Editing: Top Level Config ---
 
-async function editTopLevelConfig(
-  configData: Record<string, unknown>,
-  header: string,
-  filePath: string,
-  config: PgdevConfig,
-): Promise<void> {
-  const schema = await fetchConfigSchema(config);
-  const schemaProps = getSchemaTopLevel(schema);
-  const settingNames = Object.keys(schemaProps);
-
-  if (settingNames.length === 0) {
-    console.log(pc.dim("  Could not load config schema from npgsqlrest"));
-    return;
-  }
-
-  while (true) {
-    const options = settingNames.map((name) => {
-      const prop = schemaProps[name];
-      const value = configData[name] ?? prop.default;
-      const display = value === null || value === undefined ? "(not set)" : String(value);
-      return { label: name, description: display, help: DESCRIPTIONS[name] };
-    });
-
-    const choice = await ask("Top Level Config", options);
-    if (choice === -1) break;
-
-    const name = settingNames[choice];
-    const prop = schemaProps[name];
-
-    if (prop.enum) {
-      const enumChoice = await ask(name, prop.enum.map((v) => ({
-        label: v,
-        description: v === String(prop.default) ? "(default)" : "",
-      })));
-      if (enumChoice === -1) continue;
-      configData[name] = prop.enum[enumChoice];
-      console.log(success(`${name} = ${prop.enum[enumChoice]}`));
-    } else if (isSchemaBoolean(prop)) {
-      const current = configData[name] ?? prop.default;
-      configData[name] = !current;
-      console.log(success(`${name} = ${!current}`));
-    } else {
-      const current = (configData[name] as string) ?? "";
-      const value = askValue(name, current);
-      if (value) {
-        configData[name] = value;
-      } else {
-        delete configData[name];
-      }
-      console.log(success(`${name} = ${value || "(not set)"}`));
-    }
-
-    await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
-    console.log(info(`Saved ${filePath}`));
-  }
-}
-
 // --- NpgsqlRest dashboard helpers ---
 
 async function editSchemaItem(
@@ -729,11 +684,9 @@ async function editSchemaItem(
     })));
     if (enumChoice === -1) return false;
     container[name] = prop.enum[enumChoice];
-    console.log(success(`${name} = ${prop.enum[enumChoice]}`));
   } else if (isSchemaBoolean(prop)) {
     const current = container[name] ?? prop.default;
     container[name] = !current;
-    console.log(success(`${name} = ${!current}`));
   } else {
     const current = (container[name] as string) ?? "";
     const value = askValue(name, current);
@@ -742,7 +695,6 @@ async function editSchemaItem(
     } else {
       delete container[name];
     }
-    console.log(success(`${name} = ${value || "(not set)"}`));
   }
   return true;
 }
@@ -754,7 +706,7 @@ async function editConnectionFields(
   config: PgdevConfig,
   connName: string,
   isNew: boolean,
-): Promise<void> {
+): Promise<string | undefined> {
   const connStrings = (configData.ConnectionStrings ?? {}) as Record<string, string>;
   const parsed = parseConnectionString(connStrings[connName] ?? "");
 
@@ -788,14 +740,13 @@ async function editConnectionFields(
   console.log();
   if (askConfirm("Save changes?", true)) {
     await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
-    console.log(success(`Saved ${filePath}`));
+    if (askConfirm("Validate?")) {
+      const result = await validateNpgsqlRest(config, filePath);
+      return formatValidateResult(result, config.verbose);
+    }
+    return `Saved ${filePath}`;
   }
-
-  if (askConfirm("Validate?")) {
-    console.log();
-    const result = await validateNpgsqlRest(config, filePath);
-    console.log(formatValidateResult(result, config.verbose));
-  }
+  return undefined;
 }
 
 function buildNpgsqlRestDashboardSections(
@@ -856,45 +807,42 @@ function buildNpgsqlRestDashboardSections(
 // --- NpgsqlRest config dashboard ---
 
 async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
-  const files = discoverConfigFiles(config);
-  const existing: ConfigFileRef[] = [];
-  for (const f of files) {
-    const fullPath = resolve(process.cwd(), f.path);
-    if (await Bun.file(fullPath).exists()) existing.push(f);
-  }
+  let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
+  let chosenFileIndex = -1; // -1 = auto-pick primary file
 
-  if (existing.length === 0) {
-    console.log(pc.yellow("  No config files found. Let's create them."));
-    console.log();
-    await initNpgsqlRest();
-
-    // Reload and re-discover after init
-    const reloadedConfig = await loadConfig();
-    const newFiles = discoverConfigFiles(reloadedConfig);
-    for (const f of newFiles) {
+  while (true) {
+    const currentConfig = await loadConfig();
+    const files = discoverConfigFiles(currentConfig);
+    const existing: ConfigFileRef[] = [];
+    for (const f of files) {
       const fp = resolve(process.cwd(), f.path);
       if (await Bun.file(fp).exists()) existing.push(f);
     }
-    if (existing.length === 0) return;
-  }
 
-  let chosenFile = existing.find((f) => !f.optional) ?? existing[0];
-  let fullPath = resolve(process.cwd(), chosenFile.path);
-  let result = await readJsonConfig(fullPath);
+    if (existing.length === 0) {
+      // Show a one-item ask() so the message appears cleanly, not above a dashboard
+      await ask("NpgsqlRest config files not found", [
+        { label: "Back", description: "Use Tools Setup → NpgsqlRest Config Files to configure" },
+      ]);
+      return;
+    }
 
-  if (!result) {
-    console.error(error(`Failed to read ${chosenFile.path}`));
-    return;
-  }
+    const chosenFile = chosenFileIndex >= 0 && chosenFileIndex < existing.length
+      ? existing[chosenFileIndex]
+      : existing.find((f) => !f.optional) ?? existing[0];
+    const fullPath = resolve(process.cwd(), chosenFile.path);
+    const result = await readJsonConfig(fullPath);
 
-  const schema = await fetchConfigSchema(config);
-  const topLevelProps = getSchemaTopLevel(schema);
-  const configProps = getSchemaSection(schema, "Config");
+    if (!result) {
+      lastStatus = `Failed to read ${chosenFile.path}`;
+      continue;
+    }
 
-  let lastSelected: string | undefined;
-  let lastStatus: string | undefined;
+    const schema = await fetchConfigSchema(currentConfig);
+    const topLevelProps = getSchemaTopLevel(schema);
+    const configProps = getSchemaSection(schema, "Config");
 
-  while (true) {
     const sections = buildNpgsqlRestDashboardSections(result.data, topLevelProps, configProps);
 
     const actions: { key: string; label: string }[] = [];
@@ -922,19 +870,12 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
           existing.map((f) => ({ label: f.path, description: f.optional ? "(optional)" : "" })),
         );
         if (fileChoice >= 0) {
-          chosenFile = existing[fileChoice];
-          fullPath = resolve(process.cwd(), chosenFile.path);
-          const reloaded = await readJsonConfig(fullPath);
-          if (!reloaded) {
-            console.error(error(`Failed to read ${chosenFile.path}`));
-            break;
-          }
-          result = reloaded;
+          chosenFileIndex = fileChoice;
         }
         lastSelected = undefined;
       } else if (choice.key === "t") {
-        const validateResult = await validateNpgsqlRest(config, fullPath);
-        lastStatus = formatValidateResult(validateResult, config.verbose);
+        const validateResult = await validateNpgsqlRest(currentConfig, fullPath);
+        lastStatus = formatValidateResult(validateResult, currentConfig.verbose);
         lastSelected = undefined;
       }
       continue;
@@ -951,15 +892,15 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
         const newName = (nameInput ?? "").trim() || "Default";
         const connStrings = (result.data.ConnectionStrings ?? {}) as Record<string, string>;
         if (newName in connStrings) {
-          console.log(pc.yellow(`  "${newName}" already exists. Select it from the dashboard.`));
+          lastStatus = `"${newName}" already exists. Select it from the dashboard.`;
           continue;
         }
         connStrings[newName] = "";
         result.data.ConnectionStrings = connStrings;
-        await editConnectionFields(result.data, result.header, fullPath, config, newName, true);
+        lastStatus = await editConnectionFields(result.data, result.header, fullPath, config, newName, true);
         lastSelected = `ConnectionStrings.${newName}`;
       } else {
-        await editConnectionFields(result.data, result.header, fullPath, config, connName, false);
+        lastStatus = await editConnectionFields(result.data, result.header, fullPath, config, connName, false);
       }
     } else if (choice.key.startsWith("Config.")) {
       const name = choice.key.slice("Config.".length);
@@ -969,7 +910,7 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
         if (await editSchemaItem(configSection, name, prop)) {
           result.data.Config = configSection;
           await writeJsonConfig(fullPath, result.data, result.header, DESCRIPTIONS);
-          console.log(info(`Saved ${chosenFile.path}`));
+          lastStatus = `Saved ${chosenFile.path}`;
         }
       }
     } else {
@@ -978,7 +919,7 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
       if (prop) {
         if (await editSchemaItem(result.data, choice.key, prop)) {
           await writeJsonConfig(fullPath, result.data, result.header, DESCRIPTIONS);
-          console.log(info(`Saved ${chosenFile.path}`));
+          lastStatus = `Saved ${chosenFile.path}`;
         }
       }
     }
@@ -1046,14 +987,18 @@ async function testPgdevConnection(config: PgdevConfig): Promise<string> {
     }
 
     const envDict = await buildPgdevEnvDict(config.env_file);
+    const warnings: string[] = [];
     const connResult = await testConnectionFields(config, {
-      host: resolveConnectionField(conn.host ?? "", envDict),
-      port: resolveConnectionField(conn.port ?? "", envDict),
-      database: resolveConnectionField(conn.database ?? "", envDict),
-      username: resolveConnectionField(conn.username ?? "", envDict),
-      password: resolveConnectionField(conn.password ?? "", envDict),
+      host: resolveConnectionField(conn.host ?? "", envDict, warnings),
+      port: resolveConnectionField(conn.port ?? "", envDict, warnings),
+      database: resolveConnectionField(conn.database ?? "", envDict, warnings),
+      username: resolveConnectionField(conn.username ?? "", envDict, warnings),
+      password: resolveConnectionField(conn.password ?? "", envDict, warnings),
     });
     const lines: string[] = [];
+    if (warnings.length > 0) {
+      lines.push(pc.yellow(warnings.join(", ")));
+    }
     if (config.verbose && connResult.cmd.length > 0) {
       lines.push(pc.dim(formatCmd(connResult.cmd)));
     }
@@ -1162,7 +1107,7 @@ function buildPgdevEnvironmentDashboard(config: PgdevConfig) {
   return sections;
 }
 
-async function pickSharedConfigFile(config: PgdevConfig): Promise<void> {
+async function pickSharedConfigFile(config: PgdevConfig): Promise<string | undefined> {
   const files = discoverConfigFiles(config);
   const existing: ConfigFileRef[] = [];
   for (const f of files) {
@@ -1171,48 +1116,41 @@ async function pickSharedConfigFile(config: PgdevConfig): Promise<void> {
   }
 
   if (existing.length === 0) {
-    console.log(pc.yellow("  No config files found in pgdev.toml commands."));
-    console.log(pc.dim(`  Use the ${pc.bold("NpgsqlRest config")} option to create them.`));
-    return;
+    return "No config files found. Use Tools Setup → NpgsqlRest Config Files to create them.";
   }
 
   const fileChoice = await ask(
     "Which config file?",
     existing.map((f) => ({ label: f.path, description: f.optional ? "(optional)" : "" })),
   );
-  if (fileChoice === -1) return;
+  if (fileChoice === -1) return undefined;
 
   await updateConfig("connection", "config_file", existing[fileChoice].path);
-  console.log(info(`Config updated: connection.config_file = "${existing[fileChoice].path}"`));
+  return `connection.config_file = "${existing[fileChoice].path}"`;
 }
 
-async function pickConnectionName(config: PgdevConfig): Promise<void> {
+async function pickConnectionName(config: PgdevConfig): Promise<string | undefined> {
   const configFile = config.connection.config_file;
   if (!configFile) {
-    console.log(pc.yellow("  Set config file first."));
-    return;
+    return "Set config file first.";
   }
 
   const fullPath = resolve(process.cwd(), configFile);
   const result = await readJsonConfig(fullPath);
   if (!result) {
-    console.error(error(`Failed to read ${configFile}`));
-    return;
+    return `Failed to read ${configFile}`;
   }
 
   const connStrings = (result.data.ConnectionStrings ?? {}) as Record<string, string>;
   const connNames = Object.keys(connStrings);
 
   if (connNames.length === 0) {
-    console.log(pc.yellow("  No connection strings found in this config file."));
-    console.log(pc.dim(`  Use ${pc.bold("pgdev config")} → NpgsqlRest config to add one.`));
-    return;
+    return "No connection strings found. Use NpgsqlRest config to add one.";
   }
 
   if (connNames.length === 1) {
     await updateConfig("connection", "connection_name", connNames[0]);
-    console.log(info(`Config updated: connection.connection_name = "${connNames[0]}"`));
-    return;
+    return `connection.connection_name = "${connNames[0]}"`;
   }
 
   const connChoice = await ask(
@@ -1222,10 +1160,10 @@ async function pickConnectionName(config: PgdevConfig): Promise<void> {
       description: maskConnectionString(connStrings[name]),
     })),
   );
-  if (connChoice === -1) return;
+  if (connChoice === -1) return undefined;
 
   await updateConfig("connection", "connection_name", connNames[connChoice]);
-  console.log(info(`Config updated: connection.connection_name = "${connNames[connChoice]}"`));
+  return `connection.connection_name = "${connNames[connChoice]}"`;
 }
 
 async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
@@ -1263,10 +1201,10 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
         if (value !== current) {
           if (value) {
             await updateConfig("", "env_file", value);
-            console.log(info(`Config updated: env_file = "${value}"`));
+            lastStatus = `env_file = "${value}"`;
           } else {
             await updateConfig("", "env_file", "");
-            console.log(info("Config updated: env_file cleared"));
+            lastStatus = "env_file cleared";
           }
         }
       } else if (choice.key === "conn_mode") {
@@ -1277,17 +1215,17 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
         ]);
         if (modeChoice === 0 && !currentlyShared) {
           // Switch to shared: pick a config file
-          await pickSharedConfigFile(currentConfig);
+          lastStatus = await pickSharedConfigFile(currentConfig);
         } else if (modeChoice === 1 && currentlyShared) {
           // Switch to independent: remove config_file and connection_name
           await removeConfigKey("connection", "config_file");
           await removeConfigKey("connection", "connection_name");
-          console.log(info("Switched to independent connection mode"));
+          lastStatus = "Switched to independent connection mode";
         }
       } else if (choice.key === "conn_config_file") {
-        await pickSharedConfigFile(currentConfig);
+        lastStatus = await pickSharedConfigFile(currentConfig);
       } else if (choice.key === "conn_name") {
-        await pickConnectionName(currentConfig);
+        lastStatus = await pickConnectionName(currentConfig);
       } else if (choice.key.startsWith("conn_")) {
         const fieldMap: Record<string, string> = {
           conn_host: "host",
@@ -1302,7 +1240,7 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
           const value = askValue(field.charAt(0).toUpperCase() + field.slice(1), current, { mask: field === "password" });
           if (value !== current) {
             await updateConfig("connection", field, value);
-            console.log(info(`Config updated: connection.${field} = "${field === "password" ? "****" : value}"`));
+            lastStatus = `connection.${field} = "${field === "password" ? "****" : value}"`;
           }
         }
       }
@@ -1373,35 +1311,33 @@ async function handleProjectDir(
   key: "routines_dir" | "migrations_dir" | "tests_dir",
   label: string,
   config: PgdevConfig,
-): Promise<void> {
+): Promise<string | undefined> {
   const current = config.project[key];
   const dir = askPath(label, current);
 
-  if (dir === current) return;
+  if (dir === current) return undefined;
 
   if (!dir) {
     await updateConfig("project", key, "");
-    console.log(info(`Config updated: project.${key} cleared`));
-    return;
+    return `project.${key} cleared`;
   }
 
   const err = validateProjectDir(dir, key, config);
-  if (err) {
-    console.log(pc.yellow(`  ${err}`));
-    return;
-  }
+  if (err) return err;
 
   // Create directory if it doesn't exist
   const abs = resolve(process.cwd(), dir);
+  const msgs: string[] = [];
   try {
     statSync(abs);
   } catch {
     mkdirSync(abs, { recursive: true });
-    console.log(success(`Created ${dir}`));
+    msgs.push(`Created ${dir}`);
   }
 
   await updateConfig("project", key, dir);
-  console.log(info(`Config updated: project.${key} = "${dir}"`));
+  msgs.push(`project.${key} = "${dir}"`);
+  return msgs.join("\n");
 }
 
 function projectDirStatus(value: string): string {
@@ -1425,16 +1361,14 @@ function schemasStatus(schemas: string[]): string {
   return schemas.join(", ");
 }
 
-async function handleSchemas(config: PgdevConfig): Promise<void> {
+async function handleSchemas(config: PgdevConfig): Promise<string | undefined> {
   const result = await runPsqlQuery(config, config.commands.schemas_query);
   if (!result.ok) {
-    console.log(error(`Failed to query schemas: ${result.error}`));
-    return;
+    return `Failed to query schemas: ${result.error}`;
   }
 
   if (result.rows.length === 0) {
-    console.log(pc.yellow("  No non-system schemas found in database."));
-    return;
+    return "No non-system schemas found in database.";
   }
 
   const selected = new Set(config.project.schemas);
@@ -1450,6 +1384,7 @@ async function handleSchemas(config: PgdevConfig): Promise<void> {
 async function editProjectDirectories(config: PgdevConfig): Promise<void> {
   let currentConfig = config;
   let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
 
   while (true) {
     const sections = [
@@ -1479,7 +1414,8 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
     ];
     const actions = [{ key: "q", label: "Back" }];
 
-    const choice = await askDashboard("Project settings", sections, actions, { selected: lastSelected });
+    const choice = await askDashboard("Project settings", sections, actions, { selected: lastSelected, status: lastStatus });
+    lastStatus = undefined;
 
     if (choice === null || (choice.type === "action" && choice.key === "q")) break;
 
@@ -1491,7 +1427,7 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
         migrations_dir: "Migrations directory",
         tests_dir: "Tests directory",
       };
-      await handleProjectDir(key, labels[key], currentConfig);
+      lastStatus = await handleProjectDir(key, labels[key], currentConfig);
       currentConfig = await loadConfig();
     }
   }
@@ -1502,6 +1438,7 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
 export async function configCommand(config: PgdevConfig): Promise<void> {
   let currentConfig = config;
   let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
 
   while (true) {
     const sections = [
@@ -1543,7 +1480,8 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
     ];
     const actions = [{ key: "q", label: "Quit" }];
 
-    const choice = await askDashboard("pgdev config", sections, actions, { selected: lastSelected });
+    const choice = await askDashboard("pgdev config", sections, actions, { selected: lastSelected, status: lastStatus });
+    lastStatus = undefined;
 
     if (choice === null || (choice.type === "action" && choice.key === "q")) return;
 
@@ -1559,7 +1497,7 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
       } else if (choice.key === "project") {
         await editProjectDirectories(currentConfig);
       } else if (choice.key === "schemas") {
-        await handleSchemas(currentConfig);
+        lastStatus = await handleSchemas(currentConfig);
       }
 
       currentConfig = await loadConfig();

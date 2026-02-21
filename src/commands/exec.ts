@@ -122,6 +122,10 @@ export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<{ 
     "-c", sql,
   ];
 
+  if (config.verbose) {
+    console.error(pc.dim(formatCmd(cmd)));
+  }
+
   try {
     const proc = Bun.spawn(cmd, {
       stdin: "pipe",

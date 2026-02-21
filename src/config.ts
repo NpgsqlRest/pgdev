@@ -264,6 +264,11 @@ const EXPECTED_KEYS: { section: string; key: string; raw: string }[] = [
   { section: "tools", key: "psql", raw: 'psql = "psql"' },
   { section: "tools", key: "pg_dump", raw: 'pg_dump = "pg_dump"' },
   { section: "tools", key: "pg_restore", raw: 'pg_restore = "pg_restore"' },
+  // [npgsqlrest.commands]
+  { section: "npgsqlrest.commands", key: "dev", raw: 'dev = ""' },
+  { section: "npgsqlrest.commands", key: "validate", raw: 'validate = ""' },
+  { section: "npgsqlrest.commands", key: "serve", raw: 'serve = ""' },
+  { section: "npgsqlrest.commands", key: "validate-prod", raw: 'validate-prod = ""' },
   // [commands]
   { section: "commands", key: "schemas_query", raw: `schemas_query = "${defaults.commands.schemas_query}"` },
   // [project]
@@ -275,6 +280,7 @@ const EXPECTED_KEYS: { section: string; key: string; raw: string }[] = [
 
 const SECTION_COMMENTS: Record<string, string> = {
   tools: "# Tool paths — bare command name uses PATH, or set a full path",
+  "npgsqlrest.commands": '# NpgsqlRest run commands — value is the config file args passed to npgsqlrest CLI\n# Example: dev = "./config/production.json --optional ./config/development.json"',
   commands: "# SQL commands used by pgdev",
   project: "# Project directories for SQL source files\n# Leave empty to skip; directories are created when first needed",
 };
@@ -285,8 +291,13 @@ async function backfillConfig(path: string): Promise<void> {
 
   const has = (section: string, key: string): boolean => {
     if (!section) return key in data;
-    const sec = data[section];
-    return typeof sec === "object" && sec !== null && key in (sec as Record<string, unknown>);
+    const parts = section.split(".");
+    let obj: unknown = data;
+    for (const p of parts) {
+      if (typeof obj !== "object" || obj === null || !(p in (obj as Record<string, unknown>))) return false;
+      obj = (obj as Record<string, unknown>)[p];
+    }
+    return typeof obj === "object" && obj !== null && key in (obj as Record<string, unknown>);
   };
 
   const missing = EXPECTED_KEYS.filter((e) => !has(e.section, e.key));

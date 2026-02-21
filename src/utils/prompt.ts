@@ -26,46 +26,44 @@ function truncate(s: string, maxLen: number): string {
   return s.slice(0, maxLen - 1) + "…";
 }
 
-function renderOptions(options: Option[], selected: number, hint: string, helpHeight: number): void {
+function renderOptions(options: Option[], selected: number, hint: string, helpHeight: number): number {
   const cols = process.stdout.columns || 80;
   const maxLabel = Math.max(...options.map((o) => o.label.length));
   const maxNumWidth = `${options.length}.`.length;
-  // Line format: "  > N. label  description" — prefix takes 5 + numWidth + maxLabel + 2
-  const descAvail = cols - 5 - maxNumWidth - maxLabel - 2;
+  // Line format: "    N. label  description" — prefix takes 4 + numWidth + maxLabel + 2
+  const descAvail = cols - 4 - maxNumWidth - maxLabel - 2;
 
+  let lines = 0;
   for (let i = 0; i < options.length; i++) {
     const isSelected = i === selected;
     const num = `${i + 1}.`.padStart(maxNumWidth);
     const label = options[i].label.padEnd(maxLabel);
     const desc = truncate(options[i].description, descAvail);
     if (isSelected) {
-      process.stdout.write(`  ${pc.cyan(">")} ${pc.cyan(num)} ${pc.bold(label)}  ${pc.dim(desc)}\n`);
+      process.stdout.write(`    ${num} ${pc.inverse(label)}  ${desc}\n`);
     } else {
-      process.stdout.write(`    ${pc.dim(num)} ${label}  ${pc.dim(desc)}\n`);
+      process.stdout.write(`    ${num} ${label}  ${pc.dim(desc)}\n`);
     }
+    lines++;
   }
   process.stdout.write(`\n  ${pc.dim(hint)}\n`);
+  lines += 2;
 
   if (helpHeight > 0) {
     const helpAvail = cols - 2;
     const helpLines = options[selected].help?.split("\n") ?? [];
     process.stdout.write("\n");
+    lines++;
     for (let i = 0; i < helpHeight; i++) {
       if (i < helpLines.length) {
         process.stdout.write(`  ${pc.dim(truncate(helpLines[i], helpAvail))}\n`);
       } else {
         process.stdout.write(`\x1B[2K\n`);
       }
+      lines++;
     }
   }
-}
-
-function clearLines(count: number): void {
-  process.stdout.write(`\x1B[${count}A`);
-  for (let i = 0; i < count; i++) {
-    process.stdout.write(`\r\x1B[2K\n`);
-  }
-  process.stdout.write(`\x1B[${count}A`);
+  return lines;
 }
 
 function askFallback(question: string, allOptions: Option[], exitIndex: number): number {
@@ -107,7 +105,7 @@ export async function ask(
   ];
   const exitIndex = options.length;
   const backHint = isExit ? "Backspace to exit" : "Backspace to go back";
-  const hint = `Enter to select · ${backHint}`;
+  const hint = `Space/Enter to select · ${backHint}`;
 
   if (!process.stdin.isTTY) {
     return askFallback(question, allOptions, exitIndex);
@@ -115,16 +113,15 @@ export async function ask(
 
   // Fixed-height help area: sized to the tallest help text across all options
   const maxHelpLines = Math.max(0, ...allOptions.map((o) => (o.help ? o.help.split("\n").length : 0)));
-  // helpHeight = max help lines; helpAreaHeight includes the blank separator line
-  const helpAreaHeight = maxHelpLines > 0 ? 1 + maxHelpLines : 0;
-  const totalHeight = allOptions.length + 2 + helpAreaHeight;
 
   console.log();
   console.log(`  ${pc.bold(question)}`);
   console.log();
 
   let selected = 0;
-  renderOptions(allOptions, selected, hint, maxHelpLines);
+  let renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
+  // Park cursor at top of render area
+  process.stdout.write(`\x1B[${renderedLines}A`);
 
   process.stdin.setRawMode(true);
   try {
@@ -132,46 +129,42 @@ export async function ask(
       const key = readKey();
 
       if (key === "\x1B[A" || key === "\x1BOA") {
-        // Arrow up (normal mode or application mode)
         if (selected > 0) {
           selected--;
-          clearLines(totalHeight);
-          renderOptions(allOptions, selected, hint, maxHelpLines);
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
         }
       } else if (key === "\x1B[B" || key === "\x1BOB") {
-        // Arrow down (normal mode or application mode)
         if (selected < allOptions.length - 1) {
           selected++;
-          clearLines(totalHeight);
-          renderOptions(allOptions, selected, hint, maxHelpLines);
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
         }
-      } else if (key === "\r" || key === "\n") {
-        // Enter — select current
+      } else if (key === "\r" || key === "\n" || key === " ") {
         if (selected === exitIndex) return -1;
         return selected;
       } else if (key === "\x7F" || key === "\x08") {
-        // Backspace — back/exit
         return -1;
       } else if (key === "\x03") {
-        // Ctrl+C
         process.exit(0);
       } else {
-        // Number key
         const n = parseInt(key, 10);
         if (n >= 1 && n <= allOptions.length) {
           if (n - 1 === exitIndex) return -1;
-          clearLines(totalHeight);
-          renderOptions(allOptions, n - 1, hint, maxHelpLines);
+          selected = n - 1;
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
           return n - 1;
         }
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Clean up the help area so caller output appears right after the hint
-    if (helpAreaHeight > 0) {
-      process.stdout.write(`\x1B[${helpAreaHeight}A\x1B[J`);
-    }
+    // Clear the render area
+    process.stdout.write(`\r\x1B[J`);
   }
 }
 
@@ -229,20 +222,22 @@ function renderDashboard(
   selected: number,
   maxHelpLines: number,
   statusLines: string[],
-): void {
+): number {
   const cols = process.stdout.columns || 80;
   const maxLabel = Math.max(...allItems.map((i) => i.label.length));
   const maxNumWidth = `${allItems.length}.`.length;
-  const valueAvail = cols - 5 - maxNumWidth - maxLabel - 2;
+  const valueAvail = cols - 4 - maxNumWidth - maxLabel - 2;
   const dividerWidth = Math.min(cols - 4, 50);
   const divider = pc.dim("─".repeat(dividerWidth));
 
+  let lines = 0;
   let itemIndex = 0;
   for (let s = 0; s < sections.length; s++) {
-    if (s > 0) process.stdout.write("\n");
+    if (s > 0) { process.stdout.write("\n"); lines++; }
     if (sections[s].title) {
       process.stdout.write(`  ${pc.bold(sections[s].title)}\n`);
       process.stdout.write(`  ${divider}\n`);
+      lines += 2;
     }
 
     for (const item of sections[s].items) {
@@ -251,23 +246,27 @@ function renderDashboard(
       const label = item.label.padEnd(maxLabel);
       const value = truncate(item.value, valueAvail);
       if (isSelected) {
-        process.stdout.write(`  ${pc.cyan(">")} ${pc.cyan(num)} ${pc.bold(label)}  ${pc.dim(value)}\n`);
+        process.stdout.write(`    ${num} ${pc.inverse(label)}  ${value}\n`);
       } else {
-        process.stdout.write(`    ${pc.dim(num)} ${label}  ${pc.dim(value)}\n`);
+        process.stdout.write(`    ${num} ${label}  ${pc.dim(value)}\n`);
       }
       itemIndex++;
+      lines++;
     }
   }
 
   process.stdout.write("\n");
   process.stdout.write(`  ${divider}\n`);
+  lines += 2;
   for (const action of actions) {
     process.stdout.write(`   ${pc.cyan(action.key)}  ${action.label}\n`);
+    lines++;
   }
 
   if (maxHelpLines > 0) {
     process.stdout.write("\n");
     process.stdout.write(`  ${divider}\n`);
+    lines += 2;
     const helpLines = allItems[selected]?.help?.split("\n") ?? [];
     for (let i = 0; i < maxHelpLines; i++) {
       if (i < helpLines.length) {
@@ -275,34 +274,20 @@ function renderDashboard(
       } else {
         process.stdout.write(`\x1B[2K\n`);
       }
+      lines++;
     }
   }
 
   if (statusLines.length > 0) {
     process.stdout.write("\n");
+    lines++;
     for (const line of statusLines) {
       process.stdout.write(`  ${line}\n`);
+      lines++;
     }
   }
-}
 
-function getDashboardHeight(sections: DashboardSection[], actions: DashboardAction[], maxHelpLines: number, statusLineCount: number): number {
-  let height = 0;
-  for (let s = 0; s < sections.length; s++) {
-    if (s > 0) height++;
-    if (sections[s].title) height += 2;
-    height += sections[s].items.length;
-  }
-  height += 2;
-  height += actions.length;
-  if (maxHelpLines > 0) {
-    height += 2;
-    height += maxHelpLines;
-  }
-  if (statusLineCount > 0) {
-    height += 1 + statusLineCount;
-  }
-  return height;
+  return lines;
 }
 
 export async function askDashboard(
@@ -317,9 +302,6 @@ export async function askDashboard(
   const actionKeys = new Map(actions.map((a) => [a.key.toLowerCase(), a.key]));
   const maxHelpLines = Math.max(0, ...allItems.map((i) => (i.help ? i.help.split("\n").length : 0)));
   const statusLines = opts?.status ? opts.status.split("\n") : [];
-  const bodyHeight = getDashboardHeight(sections, actions, maxHelpLines, statusLines.length);
-  const titleHeight = 3;
-  const totalHeight = titleHeight + bodyHeight;
 
   let selected = 0;
   if (opts?.selected) {
@@ -331,9 +313,8 @@ export async function askDashboard(
   console.log(`  ${pc.bold(title)}`);
   console.log();
 
-  renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
-
   if (!process.stdin.isTTY) {
+    renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
     while (true) {
       const input = prompt(pc.dim(">"));
       if (input === null) return null;
@@ -344,6 +325,10 @@ export async function askDashboard(
     }
   }
 
+  let renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+  // Park cursor at top of render area
+  process.stdout.write(`\x1B[${renderedLines}A`);
+
   process.stdin.setRawMode(true);
   try {
     while (true) {
@@ -352,16 +337,18 @@ export async function askDashboard(
       if (key === "\x1B[A" || key === "\x1BOA") {
         if (selected > 0) {
           selected--;
-          clearLines(bodyHeight);
-          renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
         }
       } else if (key === "\x1B[B" || key === "\x1BOB") {
         if (selected < allItems.length - 1) {
           selected++;
-          clearLines(bodyHeight);
-          renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
         }
-      } else if (key === "\r" || key === "\n") {
+      } else if (key === "\r" || key === "\n" || key === " ") {
         return { type: "item", key: allItems[selected].key };
       } else if (key === "\x1B" || key === "\x7F" || key === "\x08") {
         return null;
@@ -375,15 +362,17 @@ export async function askDashboard(
         const n = parseInt(key, 10);
         if (n >= 1 && n <= allItems.length) {
           selected = n - 1;
-          clearLines(bodyHeight);
-          renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\r\x1B[J`);
+          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+          process.stdout.write(`\x1B[${renderedLines}A`);
           return { type: "item", key: allItems[n - 1].key };
         }
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    clearLines(totalHeight);
+    // Clear render area + title (blank + title + blank = 3 lines above)
+    process.stdout.write(`\x1B[3A\r\x1B[J`);
   }
 }
 
