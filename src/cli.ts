@@ -4,9 +4,9 @@ import { getCurrentVersion } from "./utils/version.ts";
 import { pc } from "./utils/terminal.ts";
 import { updateCommand } from "./commands/update.ts";
 import { runCommand } from "./commands/run.ts";
-import { initCommand } from "./commands/init.ts";
 import { configCommand } from "./commands/config.ts";
-import { loadConfig, type PgdevConfig } from "./config.ts";
+import { execCommand, psqlCommand } from "./commands/exec.ts";
+import { loadConfig, ensureConfigFile, type PgdevConfig } from "./config.ts";
 
 export function splitCommand(command: string): string[] {
   return command.trim().split(/\s+/);
@@ -83,9 +83,10 @@ ${pc.bold("Usage:")}
   ${PACKAGE_NAME} <command> [options]
 
 ${pc.bold("Commands:")}
-  init            Set up tools and initialize config files
-  setup           Alias for init
-  config          Edit NpgsqlRest config or pgdev environment
+  config          Configure tools, NpgsqlRest, environment, and project
+  init, setup     Alias for config
+  exec <sql>      Execute SQL command via psql
+  psql            Open interactive psql session
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 
@@ -116,6 +117,7 @@ export async function run(): Promise<void> {
     return;
   }
 
+  await ensureConfigFile();
   const config = await loadConfig();
 
   if (!command || command === "--help" || command === "-h") {
@@ -129,15 +131,28 @@ export async function run(): Promise<void> {
       break;
     case "init":
     case "setup":
-      await initCommand(config);
+      await configCommand(config);
+      break;
+    case "exec":
+    case "execute": {
+      const sql = args.slice(1).join(" ");
+      if (!sql) {
+        console.error(pc.red("Usage: pgdev exec <sql>"));
+        process.exit(1);
+      }
+      await execCommand(config, sql);
+      break;
+    }
+    case "psql":
+      await psqlCommand(config);
       break;
     case "update":
       await updateCommand(config);
       break;
     default:
       if (command === "detect") {
-        console.log(pc.dim(`  "detect" has been merged into "init". Running "init" instead.\n`));
-        await initCommand(config);
+        console.log(pc.dim(`  "detect" has been merged into "config". Running "config" instead.\n`));
+        await configCommand(config);
       } else if (config.npgsqlrest.commands[command]) {
         await runCommand(config, command, args.slice(1));
       } else {

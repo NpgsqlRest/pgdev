@@ -66,8 +66,16 @@ export function info(text: string): string {
   return `${pc.blue("ℹ")} ${text}`;
 }
 
+function shellQuote(args: string[]): string {
+  return args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
+}
+
+export function formatCmd(cmd: string[]): string {
+  return `$ ${shellQuote(cmd)}`;
+}
+
 export function logCommand(cmd: string[]): void {
-  console.error(`\n${pc.cyan("$")} ${cmd.join(" ")}`);
+  console.error(`\n${pc.cyan("$")} ${shellQuote(cmd)}`);
 }
 
 export function logOutput(output: string): void {
