@@ -20,76 +20,111 @@ function readKey(): string {
   return buf.subarray(0, n).toString();
 }
 
+function layoutWidth(): number {
+  return process.stdout.columns || 80;
+}
+
 function truncate(s: string, maxLen: number): string {
   if (maxLen <= 0) return "";
   if (s.length <= maxLen) return s;
   return s.slice(0, maxLen - 1) + "…";
 }
 
-function renderOptions(options: Option[], selected: number, hint: string, helpHeight: number): number {
-  const cols = process.stdout.columns || 80;
-  const maxLabel = Math.max(...options.map((o) => o.label.length));
-  const maxNumWidth = `${options.length}.`.length;
-  // Line format: "    N. label  description" — prefix takes 4 + numWidth + maxLabel + 2
-  const descAvail = cols - 4 - maxNumWidth - maxLabel - 2;
+function renderItemGrid(
+  labels: string[],
+  cellWidth: number,
+  gridCols: number,
+  selected: number,
+): string[] {
+  const rows: string[] = [];
+  for (let i = 0; i < labels.length; i += gridCols) {
+    let row = "  ";
+    for (let j = i; j < Math.min(i + gridCols, labels.length); j++) {
+      const padded = labels[j].padEnd(cellWidth);
+      row += j === selected ? pc.inverse(padded) : padded;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function renderAskView(
+  options: Option[],
+  selected: number,
+  hint: string,
+  cellWidth: number,
+  gridCols: number,
+  descHeight: number,
+  helpHeight: number,
+): number {
+  const labels = options.map((o) => o.label);
+  const gridRows = renderItemGrid(labels, cellWidth, gridCols, selected);
 
   let lines = 0;
-  for (let i = 0; i < options.length; i++) {
-    const isSelected = i === selected;
-    const num = `${i + 1}.`.padStart(maxNumWidth);
-    const label = options[i].label.padEnd(maxLabel);
-    const desc = truncate(options[i].description, descAvail);
-    if (isSelected) {
-      process.stdout.write(`    ${num} ${pc.inverse(label)}  ${desc}\n`);
-    } else {
-      process.stdout.write(`    ${num} ${label}  ${pc.dim(desc)}\n`);
-    }
+  for (const row of gridRows) {
+    process.stdout.write(`${row}\n`);
     lines++;
   }
+
+  // Hint line
   process.stdout.write(`\n  ${pc.dim(hint)}\n`);
   lines += 2;
 
-  if (helpHeight > 0) {
-    const helpAvail = cols - 2;
-    const helpLines = options[selected].help?.split("\n") ?? [];
+  // Description of selected item
+  if (descHeight > 0) {
+    const descText = options[selected]?.description ?? "";
+    if (descText) {
+      process.stdout.write(`  ${pc.dim(truncate(descText, layoutWidth() - 2))}\n`);
+    } else {
+      process.stdout.write(`\x1B[2K\n`);
+    }
+    lines++;
+  }
+
+  // Blank line between description and help
+  if (descHeight > 0 && helpHeight > 0) {
     process.stdout.write("\n");
     lines++;
+  }
+
+  // Help text of selected item
+  if (helpHeight > 0) {
+    const helpLines = options[selected]?.help?.split("\n") ?? [];
     for (let i = 0; i < helpHeight; i++) {
       if (i < helpLines.length) {
-        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], helpAvail))}\n`);
+        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}\n`);
       } else {
         process.stdout.write(`\x1B[2K\n`);
       }
       lines++;
     }
   }
+
   return lines;
 }
 
-function askFallback(question: string, allOptions: Option[], exitIndex: number): number {
+function askFallback(question: string, options: Option[]): number {
   console.log();
   console.log(`  ${pc.bold(question)}`);
   console.log();
 
-  const maxLabel = Math.max(...allOptions.map((o) => o.label.length));
-  for (let i = 0; i < allOptions.length; i++) {
+  const maxLabel = Math.max(...options.map((o) => o.label.length));
+  for (let i = 0; i < options.length; i++) {
     const num = pc.bold(`${i + 1}.`);
-    const label = allOptions[i].label.padEnd(maxLabel);
-    console.log(`  ${num} ${label}  ${pc.dim(allOptions[i].description)}`);
+    const label = options[i].label.padEnd(maxLabel);
+    console.log(`  ${num} ${label}  ${pc.dim(options[i].description)}`);
   }
 
   console.log();
 
   while (true) {
     const input = prompt(pc.dim(">"));
-    if (input === null) {
-      process.exit(0);
-    }
-    const n = parseInt(input.trim(), 10);
-    if (n >= 1 && n <= allOptions.length) {
-      return n - 1 === exitIndex ? -1 : n - 1;
-    }
-    console.log(pc.red(`  Please enter a number between 1 and ${allOptions.length}`));
+    if (input === null) return -1;
+    const trimmed = input.trim().toLowerCase();
+    if (trimmed === "q" || trimmed === "b") return -1;
+    const n = parseInt(trimmed, 10);
+    if (n >= 1 && n <= options.length) return n - 1;
+    console.log(pc.red(`  Enter 1-${options.length} or q to go back`));
   }
 }
 
@@ -98,29 +133,30 @@ export async function ask(
   options: Option[],
   opts: { exit?: boolean } = {},
 ): Promise<number> {
+  if (options.length === 0) return -1;
+
   const isExit = opts.exit === true;
-  const allOptions = [
-    ...options,
-    { label: isExit ? "Exit" : "Back", description: isExit ? "" : "Return to previous menu" },
-  ];
-  const exitIndex = options.length;
-  const backHint = isExit ? "Backspace to exit" : "Backspace to go back";
-  const hint = `Space/Enter to select · ${backHint}`;
+  const backLabel = isExit ? "⌫ exit" : "⌫ back";
+  const hint = `←→↑↓ navigate · ⏎ select · ${backLabel}`;
 
   if (!process.stdin.isTTY) {
-    return askFallback(question, allOptions, exitIndex);
+    return askFallback(question, options);
   }
 
-  // Fixed-height help area: sized to the tallest help text across all options
-  const maxHelpLines = Math.max(0, ...allOptions.map((o) => (o.help ? o.help.split("\n").length : 0)));
+  const maxLabel = Math.max(...options.map((o) => o.label.length));
+  const cellWidth = maxLabel + 2;
+  const gridCols = Math.max(1, Math.floor((layoutWidth() - 4) / cellWidth));
+
+  // Fixed-height info areas
+  const descHeight = options.some((o) => o.description) ? 1 : 0;
+  const helpHeight = Math.max(0, ...options.map((o) => (o.help ? o.help.split("\n").length : 0)));
 
   console.log();
   console.log(`  ${pc.bold(question)}`);
   console.log();
 
   let selected = 0;
-  let renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
-  // Park cursor at top of render area
+  let renderedLines = renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
   process.stdout.write(`\x1B[${renderedLines}A`);
 
   process.stdin.setRawMode(true);
@@ -128,42 +164,56 @@ export async function ask(
     while (true) {
       const key = readKey();
 
-      if (key === "\x1B[A" || key === "\x1BOA") {
-        if (selected > 0) {
-          selected--;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-        }
-      } else if (key === "\x1B[B" || key === "\x1BOB") {
-        if (selected < allOptions.length - 1) {
-          selected++;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-        }
-      } else if (key === "\r" || key === "\n" || key === " ") {
-        if (selected === exitIndex) return -1;
+      let newSelected = selected;
+
+      // Left
+      if (key === "\x1B[D" || key === "\x1BOD") {
+        newSelected = selected > 0 ? selected - 1 : options.length - 1;
+      }
+      // Right
+      else if (key === "\x1B[C" || key === "\x1BOC") {
+        newSelected = selected < options.length - 1 ? selected + 1 : 0;
+      }
+      // Up
+      else if (key === "\x1B[A" || key === "\x1BOA") {
+        const up = selected - gridCols;
+        newSelected = up >= 0 ? up : (options.length - 1 - ((options.length - 1 - selected) % gridCols));
+      }
+      // Down
+      else if (key === "\x1B[B" || key === "\x1BOB") {
+        const down = selected + gridCols;
+        newSelected = down < options.length ? down : selected % gridCols;
+      }
+      // Tab
+      else if (key === "\t") {
+        newSelected = (selected + 1) % options.length;
+      }
+      // Shift+Tab
+      else if (key === "\x1B[Z") {
+        newSelected = (selected - 1 + options.length) % options.length;
+      }
+      // Space/Enter: select
+      else if (key === "\r" || key === "\n" || key === " ") {
         return selected;
-      } else if (key === "\x7F" || key === "\x08") {
+      }
+      // Backspace/Escape: back
+      else if (key === "\x7F" || key === "\x08" || key === "\x1B") {
         return -1;
-      } else if (key === "\x03") {
+      }
+      // Ctrl+C
+      else if (key === "\x03") {
         process.exit(0);
-      } else {
-        const n = parseInt(key, 10);
-        if (n >= 1 && n <= allOptions.length) {
-          if (n - 1 === exitIndex) return -1;
-          selected = n - 1;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderOptions(allOptions, selected, hint, maxHelpLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-          return n - 1;
-        }
+      }
+
+      if (newSelected !== selected) {
+        selected = newSelected;
+        process.stdout.write(`\r\x1B[J`);
+        renderedLines = renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
+        process.stdout.write(`\x1B[${renderedLines}A`);
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Clear the render area
     process.stdout.write(`\r\x1B[J`);
   }
 }
@@ -215,23 +265,83 @@ export type DashboardResult =
   | { type: "item"; key: string }
   | { type: "action"; key: string };
 
-function renderDashboard(
+interface SectionLayout {
+  start: number;
+  count: number;
+  cellWidth: number;
+  gridCols: number;
+}
+
+function buildSectionLayouts(sections: DashboardSection[]): SectionLayout[] {
+  const w = layoutWidth();
+  const layouts: SectionLayout[] = [];
+  let start = 0;
+  for (const section of sections) {
+    const maxLabel = section.items.length > 0
+      ? Math.max(...section.items.map((i) => i.label.length))
+      : 0;
+    const cellWidth = maxLabel + 2;
+    const gridCols = Math.max(1, Math.floor((w - 4) / cellWidth));
+    layouts.push({ start, count: section.items.length, cellWidth, gridCols });
+    start += section.items.length;
+  }
+  return layouts;
+}
+
+function navigateVertical(layouts: SectionLayout[], _total: number, selected: number, direction: "up" | "down"): number {
+  // Find current section
+  let sIdx = 0;
+  for (let i = 0; i < layouts.length; i++) {
+    if (selected >= layouts[i].start && selected < layouts[i].start + layouts[i].count) {
+      sIdx = i;
+      break;
+    }
+  }
+
+  const layout = layouts[sIdx];
+  const posInSection = selected - layout.start;
+  const col = posInSection % layout.gridCols;
+
+  if (direction === "up") {
+    const row = Math.floor(posInSection / layout.gridCols);
+    if (row > 0) {
+      // Move up within section
+      return selected - layout.gridCols;
+    }
+    // Jump to previous section (wrap to last)
+    const prevIdx = (sIdx - 1 + layouts.length) % layouts.length;
+    const prev = layouts[prevIdx];
+    const lastRow = Math.floor((prev.count - 1) / prev.gridCols);
+    const targetCol = Math.min(col, prev.gridCols - 1);
+    return Math.min(prev.start + lastRow * prev.gridCols + targetCol, prev.start + prev.count - 1);
+  } else {
+    if (posInSection + layout.gridCols < layout.count) {
+      // Move down within section
+      return selected + layout.gridCols;
+    }
+    // Jump to next section (wrap to first)
+    const nextIdx = (sIdx + 1) % layouts.length;
+    const next = layouts[nextIdx];
+    const targetCol = Math.min(col, next.gridCols - 1);
+    return Math.min(next.start + targetCol, next.start + next.count - 1);
+  }
+}
+
+function renderDashboardView(
   sections: DashboardSection[],
-  actions: DashboardAction[],
   allItems: DashboardItem[],
   selected: number,
-  maxHelpLines: number,
+  hint: string,
+  layouts: SectionLayout[],
+  valueHeight: number,
+  helpHeight: number,
   statusLines: string[],
 ): number {
-  const cols = process.stdout.columns || 80;
-  const maxLabel = Math.max(...allItems.map((i) => i.label.length));
-  const maxNumWidth = `${allItems.length}.`.length;
-  const valueAvail = cols - 4 - maxNumWidth - maxLabel - 2;
-  const dividerWidth = Math.min(cols - 4, 50);
+  const dividerWidth = Math.min(layoutWidth() - 4, 50);
   const divider = pc.dim("─".repeat(dividerWidth));
 
   let lines = 0;
-  let itemIndex = 0;
+
   for (let s = 0; s < sections.length; s++) {
     if (s > 0) { process.stdout.write("\n"); lines++; }
     if (sections[s].title) {
@@ -240,37 +350,45 @@ function renderDashboard(
       lines += 2;
     }
 
-    for (const item of sections[s].items) {
-      const isSelected = itemIndex === selected;
-      const num = `${itemIndex + 1}.`.padStart(maxNumWidth);
-      const label = item.label.padEnd(maxLabel);
-      const value = truncate(item.value, valueAvail);
-      if (isSelected) {
-        process.stdout.write(`    ${num} ${pc.inverse(label)}  ${value}\n`);
-      } else {
-        process.stdout.write(`    ${num} ${label}  ${pc.dim(value)}\n`);
-      }
-      itemIndex++;
+    const sectionLabels = sections[s].items.map((i) => i.label);
+    const { start, cellWidth, gridCols } = layouts[s];
+    const sectionSelected = (selected >= start && selected < start + sectionLabels.length)
+      ? selected - start
+      : -1;
+    const gridRows = renderItemGrid(sectionLabels, cellWidth, gridCols, sectionSelected);
+    for (const row of gridRows) {
+      process.stdout.write(`${row}\n`);
       lines++;
     }
   }
 
-  process.stdout.write("\n");
-  process.stdout.write(`  ${divider}\n`);
+  // Hint line (includes action shortcuts)
+  process.stdout.write(`\n  ${pc.dim(hint)}\n`);
   lines += 2;
-  for (const action of actions) {
-    process.stdout.write(`   ${pc.cyan(action.key)}  ${action.label}\n`);
+
+  // Value of selected item
+  if (valueHeight > 0) {
+    const valueText = allItems[selected]?.value ?? "";
+    if (valueText) {
+      process.stdout.write(`  ${pc.dim(truncate(valueText, layoutWidth() - 2))}\n`);
+    } else {
+      process.stdout.write(`\x1B[2K\n`);
+    }
     lines++;
   }
 
-  if (maxHelpLines > 0) {
+  // Blank line between value and help
+  if (valueHeight > 0 && helpHeight > 0) {
     process.stdout.write("\n");
-    process.stdout.write(`  ${divider}\n`);
-    lines += 2;
+    lines++;
+  }
+
+  // Help text of selected item
+  if (helpHeight > 0) {
     const helpLines = allItems[selected]?.help?.split("\n") ?? [];
-    for (let i = 0; i < maxHelpLines; i++) {
+    for (let i = 0; i < helpHeight; i++) {
       if (i < helpLines.length) {
-        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], cols - 2))}\n`);
+        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}\n`);
       } else {
         process.stdout.write(`\x1B[2K\n`);
       }
@@ -278,6 +396,7 @@ function renderDashboard(
     }
   }
 
+  // Status messages
   if (statusLines.length > 0) {
     process.stdout.write("\n");
     lines++;
@@ -300,8 +419,21 @@ export async function askDashboard(
   if (allItems.length === 0) return null;
 
   const actionKeys = new Map(actions.map((a) => [a.key.toLowerCase(), a.key]));
-  const maxHelpLines = Math.max(0, ...allItems.map((i) => (i.help ? i.help.split("\n").length : 0)));
   const statusLines = opts?.status ? opts.status.split("\n") : [];
+
+  // Per-section grid layout
+  const layouts = buildSectionLayouts(sections);
+
+  // Fixed-height info areas
+  const valueHeight = allItems.some((i) => i.value) ? 1 : 0;
+  const helpHeight = Math.max(0, ...allItems.map((i) => (i.help ? i.help.split("\n").length : 0)));
+
+  // Build hint line with action shortcuts (q handled by ⌫ back)
+  const visibleActions = actions.filter((a) => a.key.toLowerCase() !== "q");
+  const actionHints = visibleActions.map((a) => `${pc.cyan(a.key)} ${a.label}`).join(" · ");
+  const hint = actionHints
+    ? `←→↑↓ navigate · ⏎ select · ${actionHints} · ⌫ back`
+    : `←→↑↓ navigate · ⏎ select · ⌫ back`;
 
   let selected = 0;
   if (opts?.selected) {
@@ -314,7 +446,7 @@ export async function askDashboard(
   console.log();
 
   if (!process.stdin.isTTY) {
-    renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
+    renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
     while (true) {
       const input = prompt(pc.dim(">"));
       if (input === null) return null;
@@ -325,8 +457,7 @@ export async function askDashboard(
     }
   }
 
-  let renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
-  // Park cursor at top of render area
+  let renderedLines = renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
   process.stdout.write(`\x1B[${renderedLines}A`);
 
   process.stdin.setRawMode(true);
@@ -334,39 +465,57 @@ export async function askDashboard(
     while (true) {
       const key = readKey();
 
-      if (key === "\x1B[A" || key === "\x1BOA") {
-        if (selected > 0) {
-          selected--;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-        }
-      } else if (key === "\x1B[B" || key === "\x1BOB") {
-        if (selected < allItems.length - 1) {
-          selected++;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-        }
-      } else if (key === "\r" || key === "\n" || key === " ") {
+      let newSelected = selected;
+
+      // Left
+      if (key === "\x1B[D" || key === "\x1BOD") {
+        newSelected = selected > 0 ? selected - 1 : allItems.length - 1;
+      }
+      // Right
+      else if (key === "\x1B[C" || key === "\x1BOC") {
+        newSelected = selected < allItems.length - 1 ? selected + 1 : 0;
+      }
+      // Up
+      else if (key === "\x1B[A" || key === "\x1BOA") {
+        newSelected = navigateVertical(layouts, allItems.length, selected, "up");
+      }
+      // Down
+      else if (key === "\x1B[B" || key === "\x1BOB") {
+        newSelected = navigateVertical(layouts, allItems.length, selected, "down");
+      }
+      // Tab
+      else if (key === "\t") {
+        newSelected = (selected + 1) % allItems.length;
+      }
+      // Shift+Tab
+      else if (key === "\x1B[Z") {
+        newSelected = (selected - 1 + allItems.length) % allItems.length;
+      }
+      // Space/Enter: select
+      else if (key === "\r" || key === "\n" || key === " ") {
         return { type: "item", key: allItems[selected].key };
-      } else if (key === "\x1B" || key === "\x7F" || key === "\x08") {
+      }
+      // Backspace/Escape: back
+      else if (key === "\x1B" || key === "\x7F" || key === "\x08") {
         return null;
-      } else if (key === "\x03") {
+      }
+      // Ctrl+C
+      else if (key === "\x03") {
         process.exit(0);
-      } else {
+      }
+      // Action shortcut keys
+      else {
         const lower = key.toLowerCase();
         if (actionKeys.has(lower)) {
           return { type: "action", key: actionKeys.get(lower)! };
         }
-        const n = parseInt(key, 10);
-        if (n >= 1 && n <= allItems.length) {
-          selected = n - 1;
-          process.stdout.write(`\r\x1B[J`);
-          renderedLines = renderDashboard(sections, actions, allItems, selected, maxHelpLines, statusLines);
-          process.stdout.write(`\x1B[${renderedLines}A`);
-          return { type: "item", key: allItems[n - 1].key };
-        }
+      }
+
+      if (newSelected !== selected) {
+        selected = newSelected;
+        process.stdout.write(`\r\x1B[J`);
+        renderedLines = renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+        process.stdout.write(`\x1B[${renderedLines}A`);
       }
     }
   } finally {
@@ -704,10 +853,9 @@ export function askMultiSelect(
 ): void {
   if (!process.stdin.isTTY || items.length === 0) return;
 
-  const termCols = process.stdout.columns || 80;
   const maxItemLen = Math.max(...items.map((s) => s.length));
   const cellWidth = maxItemLen + 6; // "[x] " prefix + 2 gap
-  const cols = Math.max(1, Math.floor((termCols - 2) / cellWidth));
+  const cols = Math.max(1, Math.floor((layoutWidth() - 2) / cellWidth));
   const promptWidth = 4; // "  > "
 
   let filter = "";

@@ -5,7 +5,7 @@ import { splitCommand } from "../cli.ts";
 import { resolveEnvVars, loadEnvFile, buildPgdevEnvDict } from "../utils/env.ts";
 import { readJsonConfig } from "../utils/json.ts";
 
-interface ConnectionFields {
+export interface ConnectionFields {
   host: string;
   port: string;
   database: string;
@@ -23,7 +23,7 @@ function parseConnectionString(connStr: string): Record<string, string> {
   return result;
 }
 
-async function resolveConnection(config: PgdevConfig): Promise<ConnectionFields | string> {
+export async function resolveConnection(config: PgdevConfig): Promise<ConnectionFields | string> {
   if (isSharedConnection(config.connection)) {
     const configFile = config.connection.config_file;
     if (!configFile) return "No config file set in connection.";

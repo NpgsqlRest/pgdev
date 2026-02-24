@@ -467,6 +467,83 @@ function discoverConfigFiles(config: PgdevConfig): ConfigFileRef[] {
 
 const CONN_FIELD_ORDER = ["Host", "Port", "Database", "Username", "Password"];
 
+interface ConnParamDef {
+  name: string;
+  category: string;
+  type: "string" | "boolean" | "integer" | "enum";
+  enumValues?: string[];
+  default: string;
+  help: string;
+}
+
+const CONN_PARAMS: ConnParamDef[] = [
+  // Basic
+  { name: "Host", category: "Basic", type: "string", default: "localhost", help: "PostgreSQL server hostname or IP address. Multiple hosts for failover: host1,host2." },
+  { name: "Port", category: "Basic", type: "integer", default: "5432", help: "TCP port of the PostgreSQL server." },
+  { name: "Database", category: "Basic", type: "string", default: "", help: "PostgreSQL database name. Defaults to Username if not set." },
+  { name: "Username", category: "Basic", type: "string", default: "", help: "Username for authentication." },
+  { name: "Password", category: "Basic", type: "string", default: "", help: "Password for authentication." },
+  { name: "Passfile", category: "Basic", type: "string", default: "", help: "Path to a pgpass file for password lookup." },
+  // Security
+  { name: "SSL Mode", category: "Security", type: "enum", enumValues: ["Disable", "Allow", "Prefer", "Require"], default: "Prefer", help: "Controls whether SSL/TLS is used for the connection." },
+  { name: "Trust Server Certificate", category: "Security", type: "boolean", default: "false", help: "Whether to trust the server certificate without validation." },
+  { name: "SSL Certificate", category: "Security", type: "string", default: "", help: "Path to client SSL certificate file." },
+  { name: "SSL Key", category: "Security", type: "string", default: "", help: "Path to client SSL key file." },
+  { name: "SSL Password", category: "Security", type: "string", default: "", help: "Password for the SSL client key." },
+  { name: "Root Certificate", category: "Security", type: "string", default: "", help: "Path to SSL root (CA) certificate file." },
+  { name: "Check Certificate Revocation", category: "Security", type: "boolean", default: "false", help: "Whether to check certificate revocation status." },
+  { name: "SSL Negotiation", category: "Security", type: "string", default: "", help: "Controls SSL negotiation mode." },
+  { name: "GSS Encryption Mode", category: "Security", type: "enum", enumValues: ["Disable", "Prefer", "Require"], default: "Prefer", help: "Controls whether GSS encryption is used." },
+  { name: "Channel Binding", category: "Security", type: "enum", enumValues: ["Disable", "Prefer", "Require"], default: "Prefer", help: "Controls channel binding for SCRAM authentication." },
+  { name: "Include Realm", category: "Security", type: "boolean", default: "false", help: "Include realm information in Kerberos authentication." },
+  { name: "Kerberos Service Name", category: "Security", type: "string", default: "postgres", help: "Kerberos service name for GSSAPI authentication." },
+  { name: "Include Error Detail", category: "Security", type: "boolean", default: "false", help: "Include error detail from server in exceptions." },
+  { name: "Persist Security Info", category: "Security", type: "boolean", default: "false", help: "Whether to include password in the connection string returned by the connection." },
+  { name: "Log Parameters", category: "Security", type: "boolean", default: "false", help: "Log parameters of executed SQL statements." },
+  // Pooling
+  { name: "Pooling", category: "Pooling", type: "boolean", default: "true", help: "Whether connection pooling is enabled." },
+  { name: "Minimum Pool Size", category: "Pooling", type: "integer", default: "0", help: "Minimum number of connections in the pool." },
+  { name: "Maximum Pool Size", category: "Pooling", type: "integer", default: "100", help: "Maximum number of connections in the pool." },
+  { name: "Connection Idle Lifetime", category: "Pooling", type: "integer", default: "300", help: "Seconds a connection can be idle before being pruned." },
+  { name: "Connection Pruning Interval", category: "Pooling", type: "integer", default: "10", help: "Seconds between pool pruning sweeps." },
+  { name: "Connection Lifetime", category: "Pooling", type: "integer", default: "3600", help: "Maximum seconds a connection can live (0 = unlimited)." },
+  // Timeouts
+  { name: "Timeout", category: "Timeouts", type: "integer", default: "15", help: "Seconds to wait for a connection to open." },
+  { name: "Command Timeout", category: "Timeouts", type: "integer", default: "30", help: "Seconds to wait for a command to complete (0 = indefinite)." },
+  { name: "Cancellation Timeout", category: "Timeouts", type: "integer", default: "2000", help: "Milliseconds to wait for query cancellation." },
+  { name: "Keepalive", category: "Timeouts", type: "integer", default: "0", help: "Seconds between TCP keepalive packets (0 = disabled)." },
+  { name: "Tcp Keepalive", category: "Timeouts", type: "boolean", default: "false", help: "Whether to use TCP keepalive." },
+  { name: "Tcp Keepalive Time", category: "Timeouts", type: "integer", default: "0", help: "Seconds of idle before sending TCP keepalive (0 = system default)." },
+  { name: "Tcp Keepalive Interval", category: "Timeouts", type: "integer", default: "0", help: "Seconds between TCP keepalive retransmissions." },
+  // Performance
+  { name: "No Reset On Close", category: "Performance", type: "boolean", default: "false", help: "Skip DISCARD ALL when returning connection to pool." },
+  { name: "Read Buffer Size", category: "Performance", type: "integer", default: "8192", help: "Size of the read buffer in bytes." },
+  { name: "Write Buffer Size", category: "Performance", type: "integer", default: "8192", help: "Size of the write buffer in bytes." },
+  { name: "Socket Receive Buffer Size", category: "Performance", type: "integer", default: "0", help: "TCP socket receive buffer size (0 = OS default)." },
+  { name: "Socket Send Buffer Size", category: "Performance", type: "integer", default: "0", help: "TCP socket send buffer size (0 = OS default)." },
+  { name: "Max Auto Prepare", category: "Performance", type: "integer", default: "0", help: "Max number of auto-prepared statements (0 = disabled)." },
+  { name: "Auto Prepare Min Usages", category: "Performance", type: "integer", default: "5", help: "Minimum usages before a statement is auto-prepared." },
+  // Failover
+  { name: "Target Session Attributes", category: "Failover", type: "enum", enumValues: ["Any", "Primary", "PreferPrimary", "PreferStandby", "Standby", "ReadWrite", "ReadOnly"], default: "Any", help: "Determines which server to connect to in multi-host setups." },
+  { name: "Load Balance Hosts", category: "Failover", type: "boolean", default: "false", help: "Whether to load balance across multiple hosts." },
+  { name: "Host Recheck Seconds", category: "Failover", type: "integer", default: "10", help: "Seconds before rechecking host state in failover." },
+  // Misc
+  { name: "Application Name", category: "Misc", type: "string", default: "", help: "Application name sent to PostgreSQL." },
+  { name: "Search Path", category: "Misc", type: "string", default: "", help: "Sets the schema search path." },
+  { name: "Client Encoding", category: "Misc", type: "string", default: "UTF8", help: "Client-side encoding." },
+  { name: "Timezone", category: "Misc", type: "string", default: "", help: "Session timezone." },
+  { name: "Options", category: "Misc", type: "string", default: "", help: "Command-line options sent to the server at connection start." },
+  { name: "Enlist", category: "Misc", type: "boolean", default: "true", help: "Whether to enlist in ambient TransactionScope." },
+  { name: "Multiplexing", category: "Misc", type: "boolean", default: "false", help: "Enable connection multiplexing." },
+  { name: "Array Nullability Mode", category: "Misc", type: "enum", enumValues: ["Never", "Always", "PerInstance"], default: "Never", help: "Controls nullability of array elements." },
+];
+
+const CONN_PARAM_ORDER = CONN_PARAMS.map((p) => p.name);
+
+function getConnParamDef(name: string): ConnParamDef | undefined {
+  return CONN_PARAMS.find((p) => p.name === name);
+}
+
 function parseConnectionString(connStr: string): ParsedConnectionString {
   const result: ParsedConnectionString = {};
   for (const part of connStr.split(";")) {
@@ -481,15 +558,17 @@ function parseConnectionString(connStr: string): ParsedConnectionString {
 
 function serializeConnectionString(parsed: ParsedConnectionString): string {
   const parts: string[] = [];
-  // Canonical order first
-  for (const key of CONN_FIELD_ORDER) {
+  const added = new Set<string>();
+  // Catalog order first
+  for (const key of CONN_PARAM_ORDER) {
     if (key in parsed) {
       parts.push(`${key}=${parsed[key]}`);
+      added.add(key);
     }
   }
-  // Then any remaining keys
+  // Then any remaining keys not in catalog
   for (const [key, value] of Object.entries(parsed)) {
-    if (!CONN_FIELD_ORDER.includes(key)) {
+    if (!added.has(key)) {
       parts.push(`${key}=${value}`);
     }
   }
@@ -689,7 +768,8 @@ async function editSchemaItem(
     container[name] = !current;
   } else {
     const current = (container[name] as string) ?? "";
-    const value = askValue(name, current);
+    const isPath = /file|path|dir/i.test(name);
+    const value = askValue(name, current, isPath ? { path: true } : undefined);
     if (value) {
       container[name] = value;
     } else {
@@ -699,7 +779,82 @@ async function editSchemaItem(
   return true;
 }
 
-async function editConnectionFields(
+function buildConnectionDashboard(parsed: ParsedConnectionString) {
+  const sections: { title: string; items: { key: string; label: string; value: string; help?: string }[] }[] = [];
+
+  // Group set parameters by category
+  const categories = [...new Set(CONN_PARAMS.map((p) => p.category))];
+  for (const cat of categories) {
+    const items: { key: string; label: string; value: string; help?: string }[] = [];
+    for (const param of CONN_PARAMS.filter((p) => p.category === cat)) {
+      if (param.name in parsed) {
+        const display = param.name === "Password" || param.name === "SSL Password"
+          ? (/^\{.+\}$/.test(parsed[param.name]) ? parsed[param.name] : "****")
+          : parsed[param.name];
+        items.push({
+          key: `param.${param.name}`,
+          label: param.name,
+          value: display || "(empty)",
+          help: param.help,
+        });
+      }
+    }
+    // Also include any unknown keys that aren't in the catalog
+    if (cat === "Misc") {
+      for (const key of Object.keys(parsed)) {
+        if (!CONN_PARAM_ORDER.includes(key)) {
+          items.push({
+            key: `param.${key}`,
+            label: key,
+            value: parsed[key] || "(empty)",
+            help: "Custom parameter (not in standard Npgsql catalog).",
+          });
+        }
+      }
+    }
+    if (items.length > 0) {
+      sections.push({ title: cat, items });
+    }
+  }
+
+  if (sections.length === 0) {
+    sections.push({ title: "", items: [{ key: "+add", label: "+ Add parameter", value: "", help: "Add a connection parameter." }] });
+  }
+
+  return sections;
+}
+
+async function chooseNewParam(parsed: ParsedConnectionString): Promise<string | undefined> {
+  const categories = [...new Set(CONN_PARAMS.map((p) => p.category))];
+  const availableByCategory: Record<string, ConnParamDef[]> = {};
+  for (const cat of categories) {
+    const available = CONN_PARAMS.filter((p) => p.category === cat && !(p.name in parsed));
+    if (available.length > 0) availableByCategory[cat] = available;
+  }
+
+  const catNames = Object.keys(availableByCategory);
+  if (catNames.length === 0) {
+    return undefined; // all params are set
+  }
+
+  const catChoice = await ask("Category", catNames.map((c) => ({
+    label: c,
+    description: `${availableByCategory[c].length} parameter${availableByCategory[c].length > 1 ? "s" : ""}`,
+  })));
+  if (catChoice === -1) return undefined;
+
+  const params = availableByCategory[catNames[catChoice]];
+  const paramChoice = await ask("Parameter", params.map((p) => ({
+    label: p.name,
+    description: p.default ? `default: ${p.default}` : "",
+    help: p.help,
+  })));
+  if (paramChoice === -1) return undefined;
+
+  return params[paramChoice].name;
+}
+
+async function editConnectionDashboard(
   configData: Record<string, unknown>,
   header: string,
   filePath: string,
@@ -710,43 +865,188 @@ async function editConnectionFields(
   const connStrings = (configData.ConnectionStrings ?? {}) as Record<string, string>;
   const parsed = parseConnectionString(connStrings[connName] ?? "");
 
-  const ENV_DEFAULTS: Record<string, string> = {
-    Host: "{PGHOST}", Port: "{PGPORT}", Database: "{PGDATABASE}",
-    Username: "{PGUSER}", Password: "{PGPASSWORD}",
-  };
-  for (const field of CONN_FIELD_ORDER) {
-    if (!(field in parsed)) parsed[field] = isNew ? (ENV_DEFAULTS[field] ?? "") : "";
-  }
-
-  console.log();
-  console.log(`  ${pc.bold(`Editing "${connName}"`)}`);
   if (isNew) {
-    console.log(pc.dim(`  Defaults use {ENV_VAR} placeholders — resolved at runtime when ParseEnvironmentVariables is enabled.`));
-  }
-  console.log();
-
-  for (const field of CONN_FIELD_ORDER) {
-    parsed[field] = askValue(field, parsed[field], { mask: field === "Password" });
-  }
-
-  const extraFields = Object.keys(parsed).filter((k) => !CONN_FIELD_ORDER.includes(k));
-  for (const field of extraFields) {
-    parsed[field] = askValue(field, parsed[field]);
-  }
-
-  connStrings[connName] = serializeConnectionString(parsed);
-  configData.ConnectionStrings = connStrings;
-
-  console.log();
-  if (askConfirm("Save changes?", true)) {
-    await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
-    if (askConfirm("Validate?")) {
-      const result = await validateNpgsqlRest(config, filePath);
-      return formatValidateResult(result, config.verbose);
+    const ENV_DEFAULTS: Record<string, string> = {
+      Host: "{PGHOST}", Port: "{PGPORT}", Database: "{PGDATABASE}",
+      Username: "{PGUSER}", Password: "{PGPASSWORD}",
+    };
+    for (const field of CONN_FIELD_ORDER) {
+      if (!(field in parsed)) parsed[field] = ENV_DEFAULTS[field] ?? "";
     }
-    return `Saved ${filePath}`;
   }
-  return undefined;
+
+  let dirty = isNew;
+  let lastSelected: string | undefined;
+  let lastStatus: string | undefined;
+
+  if (isNew) {
+    lastStatus = "Defaults use {ENV_VAR} placeholders — resolved at runtime when ParseEnvironmentVariables is enabled.";
+  }
+
+  while (true) {
+    const sections = buildConnectionDashboard(parsed);
+    const actions: { key: string; label: string }[] = [
+      { key: "a", label: "Add parameter" },
+      { key: "r", label: "Rename" },
+      { key: "x", label: "Delete connection" },
+      { key: "s", label: "Save" },
+      { key: "q", label: "Back" },
+    ];
+
+    const choice = await askDashboard(
+      `Connection: ${connName}`,
+      sections,
+      actions,
+      { selected: lastSelected, status: lastStatus },
+    );
+    lastStatus = undefined;
+
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      if (dirty) {
+        if (askConfirm("Save changes?", true)) {
+          connStrings[connName] = serializeConnectionString(parsed);
+          configData.ConnectionStrings = connStrings;
+          await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+          return `Saved ${filePath}`;
+        }
+      }
+      return undefined;
+    }
+
+    if (choice.type === "action") {
+      if (choice.key === "a") {
+        const paramName = await chooseNewParam(parsed);
+        if (paramName) {
+          const def = getConnParamDef(paramName);
+          if (def?.type === "boolean") {
+            parsed[paramName] = def.default === "true" ? "false" : "true";
+            dirty = true;
+            lastStatus = `Added ${paramName} = ${parsed[paramName]}`;
+          } else if (def?.enumValues) {
+            const enumChoice = await ask(paramName, def.enumValues.map((v) => ({
+              label: v,
+              description: v === def.default ? "(default)" : "",
+            })));
+            if (enumChoice >= 0) {
+              parsed[paramName] = def.enumValues[enumChoice];
+              dirty = true;
+              lastStatus = `Added ${paramName} = ${parsed[paramName]}`;
+            }
+          } else {
+            const isMask = paramName === "Password" || paramName === "SSL Password";
+            const value = askValue(paramName, def?.default ?? "", isMask ? { mask: true } : undefined);
+            parsed[paramName] = value;
+            dirty = true;
+            lastStatus = `Added ${paramName}`;
+          }
+          lastSelected = `param.${paramName}`;
+        }
+      } else if (choice.key === "r") {
+        const newName = prompt(`  ${pc.bold("New name")} ${pc.dim(`[${connName}]`)}>`);
+        const trimmed = (newName ?? "").trim();
+        if (trimmed && trimmed !== connName) {
+          if (trimmed in connStrings) {
+            lastStatus = `"${trimmed}" already exists.`;
+          } else {
+            connStrings[trimmed] = connStrings[connName];
+            delete connStrings[connName];
+            configData.ConnectionStrings = connStrings;
+            await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+            return `Renamed "${connName}" to "${trimmed}"`;
+          }
+        }
+      } else if (choice.key === "x") {
+        if (askConfirm(`Delete connection "${connName}"?`)) {
+          delete connStrings[connName];
+          configData.ConnectionStrings = connStrings;
+          await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+          return `Deleted "${connName}"`;
+        }
+      } else if (choice.key === "s") {
+        connStrings[connName] = serializeConnectionString(parsed);
+        configData.ConnectionStrings = connStrings;
+        await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+        dirty = false;
+        lastStatus = `Saved ${filePath}`;
+        if (askConfirm("Validate?")) {
+          const result = await validateNpgsqlRest(config, filePath);
+          lastStatus = formatValidateResult(result, config.verbose);
+        }
+      }
+      continue;
+    }
+
+    // Item selected
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+
+      if (choice.key === "+add") {
+        const paramName = await chooseNewParam(parsed);
+        if (paramName) {
+          const def = getConnParamDef(paramName);
+          if (def?.type === "boolean") {
+            parsed[paramName] = def.default === "true" ? "false" : "true";
+            dirty = true;
+          } else if (def?.enumValues) {
+            const enumChoice = await ask(paramName, def.enumValues.map((v) => ({
+              label: v,
+              description: v === def.default ? "(default)" : "",
+            })));
+            if (enumChoice >= 0) {
+              parsed[paramName] = def.enumValues[enumChoice];
+              dirty = true;
+            }
+          } else {
+            const isMask = paramName === "Password" || paramName === "SSL Password";
+            parsed[paramName] = askValue(paramName, def?.default ?? "", isMask ? { mask: true } : undefined);
+            dirty = true;
+          }
+          lastSelected = `param.${paramName}`;
+        }
+        continue;
+      }
+
+      if (choice.key.startsWith("param.")) {
+        const paramName = choice.key.slice("param.".length);
+        const def = getConnParamDef(paramName);
+
+        const editAction = await ask(paramName, [
+          { label: "Edit value", description: parsed[paramName] === "Password" ? "****" : (parsed[paramName] || "(empty)") },
+          { label: "Remove parameter", description: `Remove ${paramName} from connection string` },
+        ]);
+
+        if (editAction === 0) {
+          if (def?.type === "boolean") {
+            const current = parsed[paramName]?.toLowerCase();
+            parsed[paramName] = current === "true" ? "false" : "true";
+            dirty = true;
+            lastStatus = `${paramName} = ${parsed[paramName]}`;
+          } else if (def?.enumValues) {
+            const enumChoice = await ask(paramName, def.enumValues.map((v) => ({
+              label: v,
+              description: v === def.default ? "(default)" : "",
+            })));
+            if (enumChoice >= 0) {
+              parsed[paramName] = def.enumValues[enumChoice];
+              dirty = true;
+              lastStatus = `${paramName} = ${parsed[paramName]}`;
+            }
+          } else {
+            const isMask = paramName === "Password" || paramName === "SSL Password";
+            const value = askValue(paramName, parsed[paramName] ?? "", isMask ? { mask: true } : undefined);
+            parsed[paramName] = value;
+            dirty = true;
+            lastStatus = `${paramName} = ${isMask ? "****" : value}`;
+          }
+        } else if (editAction === 1) {
+          delete parsed[paramName];
+          dirty = true;
+          lastStatus = `Removed ${paramName}`;
+          lastSelected = undefined;
+        }
+      }
+    }
+  }
 }
 
 function buildNpgsqlRestDashboardSections(
@@ -897,10 +1197,10 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
         }
         connStrings[newName] = "";
         result.data.ConnectionStrings = connStrings;
-        lastStatus = await editConnectionFields(result.data, result.header, fullPath, config, newName, true);
+        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, newName, true);
         lastSelected = `ConnectionStrings.${newName}`;
       } else {
-        lastStatus = await editConnectionFields(result.data, result.header, fullPath, config, connName, false);
+        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, connName, false);
       }
     } else if (choice.key.startsWith("Config.")) {
       const name = choice.key.slice("Config.".length);

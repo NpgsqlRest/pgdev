@@ -6,6 +6,7 @@ import { updateCommand } from "./commands/update.ts";
 import { runCommand } from "./commands/run.ts";
 import { configCommand } from "./commands/config.ts";
 import { execCommand, psqlCommand } from "./commands/exec.ts";
+import { syncCommand } from "./commands/sync.ts";
 import { loadConfig, ensureConfigFile, type PgdevConfig } from "./config.ts";
 
 export function splitCommand(command: string): string[] {
@@ -87,6 +88,7 @@ ${pc.bold("Commands:")}
   init, setup     Alias for config
   exec <sql>      Execute SQL command via psql
   psql            Open interactive psql session
+  sync            Dump database schema to migrations directory
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 
@@ -145,6 +147,9 @@ export async function run(): Promise<void> {
     }
     case "psql":
       await psqlCommand(config);
+      break;
+    case "sync":
+      await syncCommand(config);
       break;
     case "update":
       await updateCommand(config);
