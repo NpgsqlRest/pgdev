@@ -23,8 +23,8 @@ async function getNpgsqlRestVersion(command: string): Promise<string> {
     const parts = splitCommand(command);
     const result = await $`${parts} --version --json`.quiet().nothrow();
     if (result.exitCode !== 0) return commandError(command, result.stderr.toString().trim());
-    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
-    return json.versions?.NpgsqlRest ?? "unknown output";
+    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string; NpgsqlRestClient?: string } };
+    return json.versions?.NpgsqlRestClient ?? json.versions?.NpgsqlRest ?? "unknown output";
   } catch (err) {
     return `error: ${err instanceof Error ? err.message : String(err)}`;
   }

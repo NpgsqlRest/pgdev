@@ -40,13 +40,13 @@ export async function tryNpgsqlRest(command: string, verbose: boolean): Promise<
       if (exitCode !== 0) return null;
       const stdout = await new Response(proc.stdout).text();
       process.stdout.write(stdout);
-      const json = JSON.parse(stdout) as { versions?: { NpgsqlRest?: string } };
-      return json.versions?.NpgsqlRest ?? null;
+      const json = JSON.parse(stdout) as { versions?: { NpgsqlRest?: string; NpgsqlRestClient?: string } };
+      return json.versions?.NpgsqlRestClient ?? json.versions?.NpgsqlRest ?? null;
     }
     const result = await $`${cmd}`.quiet().nothrow();
     if (result.exitCode !== 0) return null;
-    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
-    return json.versions?.NpgsqlRest ?? null;
+    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string; NpgsqlRestClient?: string } };
+    return json.versions?.NpgsqlRestClient ?? json.versions?.NpgsqlRest ?? null;
   } catch {
     return null;
   }
@@ -124,8 +124,8 @@ export async function verifyNpgsqlRest(command: string): Promise<string | null> 
     const parts = command.trim().split(/\s+/);
     const result = await $`${parts} --version --json`.quiet().nothrow();
     if (result.exitCode !== 0) return null;
-    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string } };
-    return json.versions?.NpgsqlRest ?? null;
+    const json = JSON.parse(result.stdout.toString()) as { versions?: { NpgsqlRest?: string; NpgsqlRestClient?: string } };
+    return json.versions?.NpgsqlRestClient ?? json.versions?.NpgsqlRest ?? null;
   } catch {
     return null;
   }

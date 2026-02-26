@@ -155,9 +155,11 @@ export async function ask(
   console.log(`  ${pc.bold(question)}`);
   console.log();
 
+  // Save cursor position after title, before content
+  process.stdout.write("\x1B7\x1B[?25l");
+
   let selected = 0;
-  let renderedLines = renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
-  process.stdout.write(`\x1B[${renderedLines}A`);
+  renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
 
   process.stdin.setRawMode(true);
   try {
@@ -207,14 +209,13 @@ export async function ask(
 
       if (newSelected !== selected) {
         selected = newSelected;
-        process.stdout.write(`\r\x1B[J`);
-        renderedLines = renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
-        process.stdout.write(`\x1B[${renderedLines}A`);
+        process.stdout.write("\x1B8\x1B[J");
+        renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    process.stdout.write(`\r\x1B[J`);
+    process.stdout.write("\x1B[?25h\x1B8\x1B[J");
   }
 }
 
@@ -230,16 +231,16 @@ export function askValue(
   label: string,
   currentValue: string,
   options?: { mask?: boolean; path?: boolean },
-): string {
+): string | null {
   const isPlaceholder = /^\{.+\}$/.test(currentValue);
   const display = options?.mask && currentValue && !isPlaceholder ? "****" : currentValue;
-  if (options?.path) {
-    const promptStr = `  ${label.padEnd(12)} ${pc.dim(`[${display}]`)}> `;
-    const input = readLineRaw(promptStr, fileComplete);
-    return (input ?? "").trim() || currentValue;
-  }
-  const input = prompt(`  ${label.padEnd(12)} ${pc.dim(`[${display}]`)}>`);
-  return (input ?? "").trim() || currentValue;
+  const promptStr = `  ${label.padEnd(12)} ${pc.dim(`[${display}]`)}> `;
+  const hint = options?.path
+    ? "⏎ confirm · Tab complete · Esc cancel"
+    : "⏎ confirm · Esc cancel";
+  const input = readLineRaw(promptStr, options?.path ? fileComplete : undefined, hint);
+  if (input === null) return null;
+  return input.trim() || currentValue;
 }
 
 // --- Dashboard ---
@@ -441,6 +442,9 @@ export async function askDashboard(
     if (idx >= 0) selected = idx;
   }
 
+  // Save cursor before title so we can restore + clear everything on exit
+  process.stdout.write("\x1B7");
+
   console.log();
   console.log(`  ${pc.bold(title)}`);
   console.log();
@@ -457,8 +461,8 @@ export async function askDashboard(
     }
   }
 
-  let renderedLines = renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
-  process.stdout.write(`\x1B[${renderedLines}A`);
+  process.stdout.write("\x1B[?25l");
+  renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
 
   process.stdin.setRawMode(true);
   try {
@@ -513,15 +517,15 @@ export async function askDashboard(
 
       if (newSelected !== selected) {
         selected = newSelected;
-        process.stdout.write(`\r\x1B[J`);
-        renderedLines = renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
-        process.stdout.write(`\x1B[${renderedLines}A`);
+        process.stdout.write("\x1B8\x1B[J");
+        process.stdout.write(`\n  ${pc.bold(title)}\n\n`);
+        renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Clear render area + title (blank + title + blank = 3 lines above)
-    process.stdout.write(`\x1B[3A\r\x1B[J`);
+    // Restore cursor to before title, clear everything, show cursor
+    process.stdout.write("\x1B[?25h\x1B8\x1B[J");
   }
 }
 
@@ -626,6 +630,7 @@ function renderCompletionGrid(items: string[], width: number, selectedIndex: num
 function readLineRaw(
   promptStr: string,
   completer?: (input: string) => CompletionResult | null,
+  hint?: string,
 ): string | null {
   if (!process.stdin.isTTY) {
     return prompt(promptStr);
@@ -661,14 +666,25 @@ function readLineRaw(
     process.stdout.write(`\r\x1B[J`);
     process.stdout.write(`${promptStr}${buffer}`);
 
+    let linesBelow = 0;
+
+    // Hint line
+    if (hint) {
+      process.stdout.write(`\n  ${pc.dim(hint)}`);
+      linesBelow++;
+    }
+
+    // Completion grid
     if (compMatches.length > 1) {
       const rows = renderCompletionGrid(compMatches, termCols, selectMode ? selectIndex : -1);
       for (const row of rows) {
         process.stdout.write(`\n  ${row}`);
       }
-      if (rows.length > 0) {
-        process.stdout.write(`\x1B[${rows.length}A`);
-      }
+      linesBelow += rows.length;
+    }
+
+    if (linesBelow > 0) {
+      process.stdout.write(`\x1B[${linesBelow}A`);
     }
 
     const col = promptWidth + cursor;
@@ -677,6 +693,12 @@ function readLineRaw(
   };
 
   process.stdout.write(promptStr);
+  // Show hint immediately on first render
+  if (hint) {
+    process.stdout.write(`\n  ${pc.dim(hint)}\x1B[1A`);
+    process.stdout.write("\r");
+    if (promptWidth > 0) process.stdout.write(`\x1B[${promptWidth}C`);
+  }
   process.stdin.setRawMode(true);
   try {
     while (true) {
@@ -874,7 +896,9 @@ export function askMultiSelect(
   };
 
   const render = (filtered: string[]) => {
-    process.stdout.write(`\r\x1B[J`);
+    // Restore cursor to before title, clear everything
+    process.stdout.write("\x1B8\x1B[J");
+    process.stdout.write(`\n  ${pc.bold(question)}\n\n`);
     process.stdout.write(`  > ${filter}`);
 
     if (filtered.length > 0) {
@@ -904,13 +928,16 @@ export function askMultiSelect(
       : "Type to filter · Tab/arrows select · a all · Backspace back";
     process.stdout.write(`\n\n  ${pc.dim(hint)}`);
 
-    // Move cursor back to input line
+    // Move cursor back to input line (within the just-rendered content)
     const linesBelow = (filtered.length > 0 ? Math.ceil(filtered.length / cols) : 1) + 2;
     process.stdout.write(`\x1B[${linesBelow}A`);
     process.stdout.write(`\r`);
     const col = promptWidth + filterCursor;
     if (col > 0) process.stdout.write(`\x1B[${col}C`);
   };
+
+  // Save cursor before title
+  process.stdout.write("\x1B7");
 
   console.log();
   console.log(`  ${pc.bold(question)}`);
@@ -1116,20 +1143,17 @@ export function askMultiSelect(
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Clear input line + grid + hint, then header (blank + title + blank)
-    process.stdout.write(`\r\x1B[J`);
-    process.stdout.write(`\x1B[3A\x1B[J`);
+    // Restore cursor to before title, clear everything
+    process.stdout.write("\x1B8\x1B[J");
   }
 }
 
-export function askPath(question: string, defaultPath: string): string {
+export function askPath(question: string, defaultPath: string): string | null {
   console.log();
   console.log(`  ${pc.bold(question)}`);
   const promptStr = `  ${pc.dim(`[${defaultPath}]`)}> `;
-  const input = readLineRaw(promptStr, dirComplete);
-  if (input === null) {
-    process.exit(0);
-  }
+  const input = readLineRaw(promptStr, dirComplete, "⏎ confirm · Tab complete · Esc cancel");
+  if (input === null) return null;
   const value = input.trim() || defaultPath;
   return value.replace(/\/+$/, "") || ".";
 }

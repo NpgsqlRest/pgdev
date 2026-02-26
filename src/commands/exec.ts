@@ -106,10 +106,12 @@ async function buildPsqlArgs(config: PgdevConfig): Promise<{ cmd: string[]; env:
   return { cmd, env: { ...process.env, PGPASSWORD: fields.password } };
 }
 
-export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<{ ok: true; rows: string[] } | { ok: false; error: string }> {
+export type PsqlResult = { ok: true; rows: string[]; cmd: string } | { ok: false; error: string; cmd: string };
+
+export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<PsqlResult> {
   const fields = await resolveConnection(config);
-  if (typeof fields === "string") return { ok: false, error: fields };
-  if (!fields.database) return { ok: false, error: "No database specified in connection." };
+  if (typeof fields === "string") return { ok: false, error: fields, cmd: "" };
+  if (!fields.database) return { ok: false, error: "No database specified in connection.", cmd: "" };
 
   const psqlParts = splitCommand(config.tools.psql);
   const cmd = [
@@ -122,9 +124,7 @@ export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<{ 
     "-c", sql,
   ];
 
-  if (config.verbose) {
-    console.error(pc.dim(formatCmd(cmd)));
-  }
+  const cmdStr = formatCmd(cmd);
 
   try {
     const proc = Bun.spawn(cmd, {
@@ -137,12 +137,12 @@ export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<{ 
     const exitCode = await proc.exited;
     if (exitCode !== 0) {
       const stderr = await new Response(proc.stderr).text();
-      return { ok: false, error: stderr.trim() || "psql exited with code " + exitCode };
+      return { ok: false, error: stderr.trim() || "psql exited with code " + exitCode, cmd: cmdStr };
     }
     const rows = stdout.trim().split("\n").filter(Boolean);
-    return { ok: true, rows };
+    return { ok: true, rows, cmd: cmdStr };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: err instanceof Error ? err.message : String(err), cmd: cmdStr };
   }
 }
 

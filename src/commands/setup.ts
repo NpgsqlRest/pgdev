@@ -135,7 +135,9 @@ async function installViaBinary(): Promise<void> {
   } else if (destChoice === 1) {
     dest = "/usr/local/bin/npgsqlrest";
   } else {
-    dest = askPath("Enter destination path:", `./npgsqlrest${asset.ext}`);
+    const path = askPath("Enter destination path:", `./npgsqlrest${asset.ext}`);
+    if (path === null) return;
+    dest = path;
   }
 
   const url = `${GITHUB_RELEASE_URL}/${asset.asset}`;

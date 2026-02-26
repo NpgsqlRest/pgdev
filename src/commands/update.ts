@@ -30,7 +30,7 @@ export async function updateCommand(config: PgdevConfig): Promise<void> {
 
     s.update(`Updating ${PACKAGE_NAME} v${currentVersion} → v${latestVersion}...`);
 
-    const installCmd = ["npm", "install", "-g", `${PACKAGE_NAME}@${latestVersion}`];
+    const installCmd = ["bun", "install", "-g", `${PACKAGE_NAME}@${latestVersion}`];
     let exitCode: number;
     let stderr = "";
 

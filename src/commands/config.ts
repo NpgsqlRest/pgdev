@@ -11,53 +11,6 @@ import { runPsqlQuery } from "./exec.ts";
 import { setupNpgsqlRest, setupPostgresTools } from "./setup.ts";
 import { detectNpgsqlRest, detectPgTools, type PgInstallation } from "../utils/tools.ts";
 
-// --- Key descriptions (from NpgsqlRest appsettings.json) ---
-
-export const DESCRIPTIONS: Record<string, string> = {
-  "ApplicationName":
-    "The application name used to set the application name property in connection string\n" +
-    'by "NpgsqlRest.SetApplicationNameInConnection" or the "NpgsqlRest.UseJsonApplicationName" settings.\n' +
-    "It is the name of the top-level directory if set to null.",
-  "EnvironmentName":
-    "Production or Development",
-  "Urls":
-    "Specify the urls the web host will listen on.\n" +
-    "See https://learn.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.hosting.hostingabstractionswebhostbuilderextensions.useurls",
-  "StartupMessage":
-    "Logs at startup, format placeholders:\n" +
-    "{time} - startup time\n" +
-    "{urls} - listening on urls\n" +
-    "{version} - current version\n" +
-    "{environment} - EnvironmentName\n" +
-    "{application} - ApplicationName\n" +
-    "\n" +
-    "Note: This message is logged at Information level. To disable this message, set to empty string.",
-  "Config":
-    "Configuration settings",
-  "Config.AddEnvironmentVariables":
-    "Add the environment variables to configuration.\n" +
-    "When enabled, environment variables will override the settings in this configuration file but can be overridden by command line arguments.\n" +
-    "Complex hierarchical keys can be defined using double underscore as a separator.\n" +
-    'For example, "ConnectionStrings__Default" environment variable will override the "ConnectionStrings.Default" setting in this configuration file.',
-  "Config.ParseEnvironmentVariables":
-    "When set, configuration values will be parsed for environment variables in the format {ENV_VAR_NAME}\n" +
-    "and replaced with the value of the environment variable when available.",
-  "Config.EnvFile":
-    "Path to a .env file containing environment variables.\n" +
-    "When AddEnvironmentVariables or ParseEnvironmentVariables is true and this file exists,\n" +
-    "variables from this file will be loaded and made available for configuration parsing.\n" +
-    "Format: KEY=VALUE (one per line)",
-  "Config.ValidateConfigKeys":
-    "Validate configuration keys against known defaults at startup.\n" +
-    '"Ignore" - no validation\n' +
-    '"Warning" - log warnings for unknown keys, continue startup (default)\n' +
-    '"Error" - log errors for unknown keys and exit',
-  "ConnectionStrings":
-    "List of named connection strings to PostgreSQL databases.\n" +
-    'The "Default" connection string is used when no connection name is specified.\n' +
-    "For connection string definition see https://www.npgsql.org/doc/connection-string-parameters.html",
-};
-
 // --- Tool status helpers ---
 
 function toolStatus(value: string, defaultValue: string): string {
@@ -656,6 +609,7 @@ interface SchemaProperty {
   type?: string | string[];
   default?: unknown;
   enum?: string[];
+  description?: string;
 }
 
 async function fetchConfigSchema(config: PgdevConfig): Promise<Record<string, unknown> | null> {
@@ -691,6 +645,26 @@ function getSchemaTopLevel(schema: Record<string, unknown> | null): Record<strin
     if (prop.type === "object" || (Array.isArray(prop.type) && prop.type.includes("object"))) continue;
     result[key] = prop;
   }
+  return result;
+}
+
+function extractDescriptions(schema: Record<string, unknown> | null): Record<string, string> {
+  if (!schema) return {};
+  const result: Record<string, string> = {};
+  function walk(props: Record<string, unknown>, prefix: string) {
+    for (const [key, value] of Object.entries(props)) {
+      const prop = value as Record<string, unknown>;
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (typeof prop.description === "string") {
+        result[path] = prop.description;
+      }
+      if (prop.properties && typeof prop.properties === "object") {
+        walk(prop.properties as Record<string, unknown>, path);
+      }
+    }
+  }
+  const props = (schema as Record<string, Record<string, unknown>>).properties;
+  if (props) walk(props, "");
   return result;
 }
 
@@ -770,6 +744,7 @@ async function editSchemaItem(
     const current = (container[name] as string) ?? "";
     const isPath = /file|path|dir/i.test(name);
     const value = askValue(name, current, isPath ? { path: true } : undefined);
+    if (value === null) return false;
     if (value) {
       container[name] = value;
     } else {
@@ -861,6 +836,7 @@ async function editConnectionDashboard(
   config: PgdevConfig,
   connName: string,
   isNew: boolean,
+  descriptions: Record<string, string>,
 ): Promise<string | undefined> {
   const connStrings = (configData.ConnectionStrings ?? {}) as Record<string, string>;
   const parsed = parseConnectionString(connStrings[connName] ?? "");
@@ -906,7 +882,7 @@ async function editConnectionDashboard(
         if (askConfirm("Save changes?", true)) {
           connStrings[connName] = serializeConnectionString(parsed);
           configData.ConnectionStrings = connStrings;
-          await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+          await writeJsonConfig(filePath, configData, header, descriptions);
           return `Saved ${filePath}`;
         }
       }
@@ -935,9 +911,11 @@ async function editConnectionDashboard(
           } else {
             const isMask = paramName === "Password" || paramName === "SSL Password";
             const value = askValue(paramName, def?.default ?? "", isMask ? { mask: true } : undefined);
-            parsed[paramName] = value;
-            dirty = true;
-            lastStatus = `Added ${paramName}`;
+            if (value !== null) {
+              parsed[paramName] = value;
+              dirty = true;
+              lastStatus = `Added ${paramName}`;
+            }
           }
           lastSelected = `param.${paramName}`;
         }
@@ -951,7 +929,7 @@ async function editConnectionDashboard(
             connStrings[trimmed] = connStrings[connName];
             delete connStrings[connName];
             configData.ConnectionStrings = connStrings;
-            await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+            await writeJsonConfig(filePath, configData, header, descriptions);
             return `Renamed "${connName}" to "${trimmed}"`;
           }
         }
@@ -959,13 +937,13 @@ async function editConnectionDashboard(
         if (askConfirm(`Delete connection "${connName}"?`)) {
           delete connStrings[connName];
           configData.ConnectionStrings = connStrings;
-          await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+          await writeJsonConfig(filePath, configData, header, descriptions);
           return `Deleted "${connName}"`;
         }
       } else if (choice.key === "s") {
         connStrings[connName] = serializeConnectionString(parsed);
         configData.ConnectionStrings = connStrings;
-        await writeJsonConfig(filePath, configData, header, DESCRIPTIONS);
+        await writeJsonConfig(filePath, configData, header, descriptions);
         dirty = false;
         lastStatus = `Saved ${filePath}`;
         if (askConfirm("Validate?")) {
@@ -998,8 +976,11 @@ async function editConnectionDashboard(
             }
           } else {
             const isMask = paramName === "Password" || paramName === "SSL Password";
-            parsed[paramName] = askValue(paramName, def?.default ?? "", isMask ? { mask: true } : undefined);
-            dirty = true;
+            const value = askValue(paramName, def?.default ?? "", isMask ? { mask: true } : undefined);
+            if (value !== null) {
+              parsed[paramName] = value;
+              dirty = true;
+            }
           }
           lastSelected = `param.${paramName}`;
         }
@@ -1034,6 +1015,7 @@ async function editConnectionDashboard(
           } else {
             const isMask = paramName === "Password" || paramName === "SSL Password";
             const value = askValue(paramName, parsed[paramName] ?? "", isMask ? { mask: true } : undefined);
+            if (value === null) continue;
             parsed[paramName] = value;
             dirty = true;
             lastStatus = `${paramName} = ${isMask ? "****" : value}`;
@@ -1053,6 +1035,7 @@ function buildNpgsqlRestDashboardSections(
   configData: Record<string, unknown>,
   topLevelProps: Record<string, SchemaProperty>,
   configProps: Record<string, SchemaProperty>,
+  descriptions: Record<string, string>,
 ) {
   const sections: { title: string; items: { key: string; label: string; value: string; help?: string }[] }[] = [];
 
@@ -1065,7 +1048,7 @@ function buildNpgsqlRestDashboardSections(
         const prop = topLevelProps[name];
         const value = configData[name] ?? prop.default;
         const display = value === null || value === undefined ? "(not set)" : String(value);
-        return { key: name, label: name, value: display, help: DESCRIPTIONS[name] };
+        return { key: name, label: name, value: display, help: descriptions[name] };
       }),
     });
   }
@@ -1080,7 +1063,7 @@ function buildNpgsqlRestDashboardSections(
         const prop = configProps[name];
         const value = configSection[name] ?? prop.default;
         const display = value === null || value === undefined ? "(not set)" : String(value);
-        return { key: `Config.${name}`, label: name, value: display, help: DESCRIPTIONS[`Config.${name}`] };
+        return { key: `Config.${name}`, label: name, value: display, help: descriptions[`Config.${name}`] };
       }),
     });
   }
@@ -1091,7 +1074,7 @@ function buildNpgsqlRestDashboardSections(
     key: `ConnectionStrings.${name}`,
     label: name,
     value: maskConnectionString(connStrings[name]),
-    help: DESCRIPTIONS["ConnectionStrings"],
+    help: descriptions["ConnectionStrings"],
   }));
   connItems.push({
     key: "ConnectionStrings.+new",
@@ -1140,10 +1123,11 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
     }
 
     const schema = await fetchConfigSchema(currentConfig);
+    const descriptions = extractDescriptions(schema);
     const topLevelProps = getSchemaTopLevel(schema);
     const configProps = getSchemaSection(schema, "Config");
 
-    const sections = buildNpgsqlRestDashboardSections(result.data, topLevelProps, configProps);
+    const sections = buildNpgsqlRestDashboardSections(result.data, topLevelProps, configProps, descriptions);
 
     const actions: { key: string; label: string }[] = [];
     if (existing.length > 1) {
@@ -1197,10 +1181,10 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
         }
         connStrings[newName] = "";
         result.data.ConnectionStrings = connStrings;
-        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, newName, true);
+        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, newName, true, descriptions);
         lastSelected = `ConnectionStrings.${newName}`;
       } else {
-        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, connName, false);
+        lastStatus = await editConnectionDashboard(result.data, result.header, fullPath, config, connName, false, descriptions);
       }
     } else if (choice.key.startsWith("Config.")) {
       const name = choice.key.slice("Config.".length);
@@ -1209,7 +1193,7 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
         const configSection = (result.data.Config ?? {}) as Record<string, unknown>;
         if (await editSchemaItem(configSection, name, prop)) {
           result.data.Config = configSection;
-          await writeJsonConfig(fullPath, result.data, result.header, DESCRIPTIONS);
+          await writeJsonConfig(fullPath, result.data, result.header, descriptions);
           lastStatus = `Saved ${chosenFile.path}`;
         }
       }
@@ -1218,7 +1202,7 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
       const prop = topLevelProps[choice.key];
       if (prop) {
         if (await editSchemaItem(result.data, choice.key, prop)) {
-          await writeJsonConfig(fullPath, result.data, result.header, DESCRIPTIONS);
+          await writeJsonConfig(fullPath, result.data, result.header, descriptions);
           lastStatus = `Saved ${chosenFile.path}`;
         }
       }
@@ -1498,7 +1482,7 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
       if (choice.key === "env_file") {
         const current = currentConfig.env_file ?? "";
         const value = askValue("Env file", current, { path: true });
-        if (value !== current) {
+        if (value !== null && value !== current) {
           if (value) {
             await updateConfig("", "env_file", value);
             lastStatus = `env_file = "${value}"`;
@@ -1538,7 +1522,7 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
         if (field) {
           const current = currentConfig.connection[field as keyof typeof currentConfig.connection] as string ?? "";
           const value = askValue(field.charAt(0).toUpperCase() + field.slice(1), current, { mask: field === "password" });
-          if (value !== current) {
+          if (value !== null && value !== current) {
             await updateConfig("connection", field, value);
             lastStatus = `connection.${field} = "${field === "password" ? "****" : value}"`;
           }
@@ -1614,6 +1598,7 @@ async function handleProjectDir(
 ): Promise<string | undefined> {
   const current = config.project[key];
   const dir = askPath(label, current);
+  if (dir === null) return undefined;
 
   if (dir === current) return undefined;
 
@@ -1664,7 +1649,8 @@ function schemasStatus(schemas: string[]): string {
 async function handleSchemas(config: PgdevConfig): Promise<string | undefined> {
   const result = await runPsqlQuery(config, config.commands.schemas_query);
   if (!result.ok) {
-    return `Failed to query schemas: ${result.error}`;
+    const msg = pc.red(`Failed to query schemas: ${result.error}`);
+    return config.verbose && result.cmd ? `${pc.blue(result.cmd)}\n${msg}` : msg;
   }
 
   if (result.rows.length === 0) {
