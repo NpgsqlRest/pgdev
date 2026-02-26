@@ -41,7 +41,7 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
   const dumpCmd = [...pgDumpParts, "-Fc", "--schema-only", "--no-owner", ...connArgs, ...schemaArgs, "-f", dumpFile];
 
   if (config.verbose) {
-    console.error(pc.dim(formatCmd(dumpCmd)));
+    console.error(pc.cyan(formatCmd(dumpCmd)));
   }
 
   const dumpProc = Bun.spawn(dumpCmd, { stdout: "pipe", stderr: "pipe", env });
@@ -62,7 +62,7 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
     const listCmd = [...pgRestoreParts, "-l", dumpFile];
 
     if (config.verbose) {
-      console.error(pc.dim(formatCmd(listCmd)));
+      console.error(pc.cyan(formatCmd(listCmd)));
     }
 
     const listProc = Bun.spawn(listCmd, { stdout: "pipe", stderr: "pipe", env });
@@ -90,7 +90,7 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       const restoreCmd = [...pgRestoreParts, "-L", tocFile, "-f", "-", dumpFile];
 
       if (config.verbose) {
-        console.error(pc.dim(formatCmd(restoreCmd)));
+        console.error(pc.cyan(formatCmd(restoreCmd)));
       }
 
       const restoreProc = Bun.spawn(restoreCmd, { stdout: "pipe", stderr: "pipe", env });

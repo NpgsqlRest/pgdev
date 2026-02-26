@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { updateConfig } from "../config.ts";
 import { success, error, info, pc, logCommand } from "../utils/terminal.ts";
-import { ask, askPath } from "../utils/prompt.ts";
+import { ask, askPath, askConfirm } from "../utils/prompt.ts";
 import { noopSpinner, verifyNpgsqlRest, verifyPgTool } from "../utils/tools.ts";
 
 const GITHUB_RELEASE_URL = "https://github.com/NpgsqlRest/NpgsqlRest/releases/latest/download";
@@ -171,6 +171,32 @@ async function installViaBinary(): Promise<void> {
     console.log(pc.dim("  Could not verify version — run pgdev -v to check."));
   }
   console.log(info(`Config updated: tools.npgsqlrest = "${dest}"`));
+
+  // Offer to add to PATH if not already there
+  if (process.platform !== "win32") {
+    const { resolve, dirname, basename } = await import("node:path");
+    const absDest = resolve(dest);
+    const destDir = dirname(absDest);
+    const pathDirs = (process.env.PATH ?? "").split(":");
+    const onPath = pathDirs.some((d) => resolve(d) === destDir);
+
+    if (!onPath) {
+      const linkDir = pathDirs.includes("/usr/local/bin") ? "/usr/local/bin" : null;
+      if (linkDir) {
+        const linkPath = `${linkDir}/${basename(absDest)}`;
+        if (askConfirm(`Create symlink ${linkPath} → ${absDest} to add to PATH?`)) {
+          try {
+            await exec(["ln", "-sf", absDest, linkPath]);
+            console.log(success(`Symlinked to ${linkPath}`));
+          } catch {
+            console.log(pc.dim(`  Could not create symlink. You can run manually:\n  ln -s ${absDest} ${linkPath}`));
+          }
+        }
+      } else {
+        console.log(pc.dim(`  Note: ${absDest} is not on PATH. Add its directory to PATH to use "npgsqlrest" directly.`));
+      }
+    }
+  }
 }
 
 async function installViaDocker(): Promise<void> {

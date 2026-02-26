@@ -575,7 +575,7 @@ function formatValidateResult(
   const lines: string[] = [];
 
   if (verbose) {
-    lines.push(pc.dim(formatCmd(output.cmd)));
+    lines.push(pc.cyan(formatCmd(output.cmd)));
   }
 
   if ("error" in output) {
@@ -689,20 +689,14 @@ function resolveConnectionField(value: string, envDict: Record<string, string>, 
 async function testConnectionFields(
   config: PgdevConfig,
   fields: ConnectionFields,
-): Promise<{ success: boolean; error?: string; cmd: string[] }> {
-  if (!fields.database) {
-    return { success: false, error: "No database specified", cmd: [] };
-  }
-
+): Promise<{ success: boolean; version?: string; error?: string; cmd: string[] }> {
   const psqlParts = splitCommand(config.tools.psql);
-  const cmd = [
-    ...psqlParts,
-    "-h", fields.host || "localhost",
-    "-p", fields.port || "5432",
-    "-d", fields.database,
-    "-U", fields.username,
-    "-c", "SELECT 1",
-  ];
+  const cmd = [...psqlParts];
+  if (fields.host) { cmd.push("-h", fields.host); }
+  if (fields.port) { cmd.push("-p", fields.port); }
+  if (fields.database) { cmd.push("-d", fields.database); }
+  if (fields.username) { cmd.push("-U", fields.username); }
+  cmd.push("-t", "-A", "-c", "SELECT version()");
 
   try {
     const proc = Bun.spawn(cmd, {
@@ -711,8 +705,9 @@ async function testConnectionFields(
       stderr: "pipe",
       env: { ...process.env, PGPASSWORD: fields.password },
     });
+    const stdout = await new Response(proc.stdout).text();
     const exitCode = await proc.exited;
-    if (exitCode === 0) return { success: true, cmd };
+    if (exitCode === 0) return { success: true, version: stdout.trim(), cmd };
     const stderr = await new Response(proc.stderr).text();
     return { success: false, error: stderr.trim(), cmd };
   } catch (err) {
@@ -1256,20 +1251,17 @@ async function testPgdevConnection(config: PgdevConfig): Promise<string> {
     });
     const lines: string[] = [];
     if (config.verbose && connResult.cmd.length > 0) {
-      lines.push(pc.dim(formatCmd(connResult.cmd)));
+      lines.push(pc.cyan(formatCmd(connResult.cmd)));
     }
     if (connResult.success) {
-      lines.push(success(`Connection: OK (shared "${connName}" from ${configFile})`));
+      lines.push(success(`Connection OK — shared "${connName}" from ${configFile}`));
+      if (connResult.version) lines.push(pc.dim(`  ${connResult.version}`));
     } else {
-      lines.push(error(`Connection: ${connResult.error}`));
+      lines.push(pc.red(`Connection failed: ${connResult.error}`));
     }
     return lines.join("\n");
   } else {
     const conn = config.connection;
-    if (!conn.database && !conn.host) {
-      return pc.yellow("No connection configured.");
-    }
-
     const envDict = await buildPgdevEnvDict(config.env_file);
     const warnings: string[] = [];
     const connResult = await testConnectionFields(config, {
@@ -1284,12 +1276,13 @@ async function testPgdevConnection(config: PgdevConfig): Promise<string> {
       lines.push(pc.yellow(warnings.join(", ")));
     }
     if (config.verbose && connResult.cmd.length > 0) {
-      lines.push(pc.dim(formatCmd(connResult.cmd)));
+      lines.push(pc.cyan(formatCmd(connResult.cmd)));
     }
     if (connResult.success) {
-      lines.push(success("Connection: OK"));
+      lines.push(success("Connection OK"));
+      if (connResult.version) lines.push(pc.dim(`  ${connResult.version}`));
     } else {
-      lines.push(error(`Connection: ${connResult.error}`));
+      lines.push(pc.red(`Connection failed: ${connResult.error}`));
     }
     return lines.join("\n");
   }
@@ -1388,6 +1381,16 @@ function buildPgdevEnvironmentDashboard(config: PgdevConfig) {
 
   sections.push({ title: "Database Connection", items: connItems });
 
+  sections.push({
+    title: "",
+    items: [{
+      key: "test_connection",
+      label: "Test connection",
+      value: "",
+      help: "Run SELECT version() against the configured database to verify connectivity.",
+    }],
+  });
+
   return sections;
 }
 
@@ -1458,7 +1461,6 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
   while (true) {
     const sections = buildPgdevEnvironmentDashboard(currentConfig);
     const actions = [
-      { key: "t", label: "Test connection" },
       { key: "q", label: "Back" },
     ];
 
@@ -1468,14 +1470,13 @@ async function editPgdevEnvironment(config: PgdevConfig): Promise<void> {
       break;
     }
 
-    if (choice.type === "action" && choice.key === "t") {
-      lastStatus = await testPgdevConnection(currentConfig);
-      lastSelected = undefined;
-      currentConfig = await loadConfig();
-      continue;
-    }
-
     if (choice.type === "item") {
+      if (choice.key === "test_connection") {
+        lastStatus = await testPgdevConnection(currentConfig);
+        lastSelected = "test_connection";
+        currentConfig = await loadConfig();
+        continue;
+      }
       lastSelected = choice.key;
       lastStatus = undefined;
 
@@ -1650,7 +1651,7 @@ async function handleSchemas(config: PgdevConfig): Promise<string | undefined> {
   const result = await runPsqlQuery(config, config.commands.schemas_query);
   if (!result.ok) {
     const msg = pc.red(`Failed to query schemas: ${result.error}`);
-    return config.verbose && result.cmd ? `${pc.blue(result.cmd)}\n${msg}` : msg;
+    return config.verbose && result.cmd ? `${pc.cyan(result.cmd)}\n${msg}` : msg;
   }
 
   if (result.rows.length === 0) {

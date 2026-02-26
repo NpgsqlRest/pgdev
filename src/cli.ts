@@ -5,7 +5,7 @@ import { pc } from "./utils/terminal.ts";
 import { updateCommand } from "./commands/update.ts";
 import { runCommand } from "./commands/run.ts";
 import { configCommand } from "./commands/config.ts";
-import { execCommand, psqlCommand } from "./commands/exec.ts";
+import { execCommand, psqlCommand, runPsqlQuery } from "./commands/exec.ts";
 import { syncCommand } from "./commands/sync.ts";
 import { loadConfig, ensureConfigFile, type PgdevConfig } from "./config.ts";
 
@@ -43,6 +43,20 @@ async function getPgToolVersion(command: string): Promise<string> {
   }
 }
 
+async function toolHint(command: string): Promise<string> {
+  const cmd = command.trim();
+  if (cmd.startsWith("docker ")) return "docker";
+  if (cmd.startsWith("bunx ") || cmd.startsWith("npx ")) return cmd.split(" ")[0];
+  if (cmd.startsWith("./") || cmd.startsWith("/") || cmd.includes("/")) return cmd;
+  // Bare command — resolve via which
+  const name = cmd.split(/\s+/)[0];
+  try {
+    const result = await $`which ${name}`.quiet().nothrow();
+    if (result.exitCode === 0) return `${result.stdout.toString().trim()} (PATH)`;
+  } catch {}
+  return name;
+}
+
 async function printVersion(): Promise<void> {
   const config = await loadConfig();
   const { tools } = config;
@@ -54,24 +68,43 @@ async function printVersion(): Promise<void> {
     getPgToolVersion(tools.pg_restore),
   ]);
 
-  const entries: [string, string][] = [
-    [PACKAGE_NAME, getCurrentVersion()],
-    ["npgsqlrest", npgsqlrest],
-    ["psql", psql],
-    ["pg_dump", pgDump],
-    ["pg_restore", pgRestore],
+  const [hNpgsqlrest, hPsql, hPgDump, hPgRestore] = await Promise.all([
+    toolHint(tools.npgsqlrest),
+    toolHint(tools.psql),
+    toolHint(tools.pg_dump),
+    toolHint(tools.pg_restore),
+  ]);
+
+  const entries: [string, string, string][] = [
+    [PACKAGE_NAME, getCurrentVersion(), ""],
+    ["npgsqlrest", npgsqlrest, hNpgsqlrest],
+    ["psql", psql, hPsql],
+    ["pg_dump", pgDump, hPgDump],
+    ["pg_restore", pgRestore, hPgRestore],
   ];
 
-  const maxLen = Math.max(...entries.map(([name]) => name.length));
+  const maxName = Math.max(...entries.map(([name]) => name.length));
+  const maxVer = Math.max(...entries.map(([, ver]) => ver.length));
 
-  for (const [name, ver] of entries) {
-    const label = name.padEnd(maxLen);
+  for (const [name, ver, hint] of entries) {
+    const label = name.padEnd(maxName);
+    const verPad = ver.padEnd(maxVer);
     const value =
-      ver.startsWith("not found:") ? pc.dim(ver) :
-      ver.startsWith("error:") ? pc.red(ver) :
-      ver.startsWith("unknown") ? pc.yellow(ver) :
-      pc.green(ver);
-    console.log(`${label}  ${value}`);
+      ver.startsWith("not found:") ? pc.dim(verPad) :
+      ver.startsWith("error:") ? pc.red(verPad) :
+      ver.startsWith("unknown") ? pc.yellow(verPad) :
+      pc.green(verPad);
+    const suffix = hint ? `  ${pc.dim(hint)}` : "";
+    console.log(`${label}  ${value}${suffix}`);
+  }
+
+  // Query server version
+  const serverLabel = "server".padEnd(maxName);
+  const serverResult = await runPsqlQuery(config, "SELECT version()");
+  if (serverResult.ok && serverResult.rows.length > 0) {
+    console.log(`${serverLabel}  ${pc.green(serverResult.rows[0])}`);
+  } else if (!serverResult.ok) {
+    console.log(`${serverLabel}  ${pc.dim(serverResult.error)}`);
   }
 }
 

@@ -71,11 +71,11 @@ function shellQuote(args: string[]): string {
 }
 
 export function formatCmd(cmd: string[]): string {
-  return `$ ${shellQuote(cmd)}`;
+  return shellQuote(cmd);
 }
 
 export function logCommand(cmd: string[]): void {
-  console.error(`\n${pc.cyan("$")} ${shellQuote(cmd)}`);
+  console.error(pc.cyan(shellQuote(cmd)));
 }
 
 export function logOutput(output: string): void {

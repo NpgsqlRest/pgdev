@@ -151,7 +151,7 @@ export async function execCommand(config: PgdevConfig, sql: string): Promise<voi
   cmd.push("-c", sql);
 
   if (config.verbose) {
-    console.error(pc.dim(formatCmd(cmd)));
+    console.error(pc.cyan(formatCmd(cmd)));
   }
 
   const proc = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit", env });
@@ -163,7 +163,7 @@ export async function psqlCommand(config: PgdevConfig): Promise<void> {
   const { cmd, env } = await buildPsqlArgs(config);
 
   if (config.verbose) {
-    console.error(pc.dim(formatCmd(cmd)));
+    console.error(pc.cyan(formatCmd(cmd)));
   }
 
   const proc = Bun.spawn(cmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env });
