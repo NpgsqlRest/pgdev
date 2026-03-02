@@ -30,6 +30,16 @@ export async function updateCommand(config: PgdevConfig): Promise<void> {
 
     s.update(`Updating ${PACKAGE_NAME} v${currentVersion} → v${latestVersion}...`);
 
+    // Clear bun's registry cache so freshly-published versions resolve
+    const cacheCmd = ["bun", "pm", "cache", "rm"];
+    if (verbose) {
+      logCommand(cacheCmd);
+      const cacheProc = Bun.spawn(cacheCmd, { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      await cacheProc.exited;
+    } else {
+      await $`${cacheCmd}`.quiet().nothrow();
+    }
+
     const installCmd = ["bun", "install", "-g", `${PACKAGE_NAME}@${latestVersion}`];
     let exitCode: number;
     let stderr = "";

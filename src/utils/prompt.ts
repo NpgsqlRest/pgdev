@@ -2,6 +2,16 @@ import { readSync, readdirSync } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { pc } from "./terminal.ts";
 
+// Track alt screen state so cleanup only runs when needed
+let inAltScreen = false;
+const cleanup = () => {
+  if (inAltScreen) process.stdout.write("\x1B[?1049l");
+  process.stdout.write("\x1B[?25h");
+};
+process.on("exit", cleanup);
+process.on("SIGINT", () => { cleanup(); process.exit(130); });
+process.on("SIGTERM", () => { cleanup(); process.exit(143); });
+
 export interface Option {
   label: string;
   description: string;
@@ -18,6 +28,29 @@ function readKey(): string {
   const buf = Buffer.alloc(32);
   const n = readSync(0, buf, 0, 32, null);
   return buf.subarray(0, n).toString();
+}
+
+function enterScreen(): void {
+  inAltScreen = true;
+  process.stdout.write("\x1B[?1049h"); // enter alt screen
+  process.stdout.write("\x1B[?25l");   // hide cursor
+}
+
+function exitScreen(): void {
+  inAltScreen = false;
+  process.stdout.write("\x1B[?1049l"); // exit alt screen (restores original)
+  process.stdout.write("\x1B[?25h");   // show cursor
+}
+
+function renderScreen(lines: string[]): void {
+  const rows = process.stdout.rows || 24;
+  process.stdout.write("\x1B[H"); // cursor to home (top-left)
+  const count = Math.min(lines.length, rows);
+  for (let i = 0; i < count; i++) {
+    process.stdout.write(`\x1B[2K${lines[i]}${i < count - 1 ? "\n" : ""}`);
+  }
+  // Clear any remaining lines below content
+  process.stdout.write("\x1B[J");
 }
 
 function layoutWidth(): number {
@@ -48,7 +81,8 @@ function renderItemGrid(
   return rows;
 }
 
-function renderAskView(
+function buildAskLines(
+  question: string,
   options: Option[],
   selected: number,
   hint: string,
@@ -56,50 +90,30 @@ function renderAskView(
   gridCols: number,
   descHeight: number,
   helpHeight: number,
-): number {
+): string[] {
+  const lines: string[] = [];
+  lines.push("");
+  lines.push(`  ${pc.bold(question)}`);
+  lines.push("");
+
   const labels = options.map((o) => o.label);
   const gridRows = renderItemGrid(labels, cellWidth, gridCols, selected);
+  for (const row of gridRows) lines.push(row);
 
-  let lines = 0;
-  for (const row of gridRows) {
-    process.stdout.write(`${row}\n`);
-    lines++;
-  }
+  lines.push("");
+  lines.push(`  ${pc.dim(hint)}`);
 
-  // Hint line
-  process.stdout.write(`\n  ${pc.dim(hint)}\n`);
-  lines += 2;
-
-  // Description of selected item
   if (descHeight > 0) {
     const descText = options[selected]?.description ?? "";
-    if (descText) {
-      process.stdout.write(`  ${pc.dim(truncate(descText, layoutWidth() - 2))}\n`);
-    } else {
-      process.stdout.write(`\x1B[2K\n`);
-    }
-    lines++;
+    lines.push(descText ? `  ${pc.dim(truncate(descText, layoutWidth() - 2))}` : "");
   }
-
-  // Blank line between description and help
-  if (descHeight > 0 && helpHeight > 0) {
-    process.stdout.write("\n");
-    lines++;
-  }
-
-  // Help text of selected item
+  if (descHeight > 0 && helpHeight > 0) lines.push("");
   if (helpHeight > 0) {
     const helpLines = options[selected]?.help?.split("\n") ?? [];
     for (let i = 0; i < helpHeight; i++) {
-      if (i < helpLines.length) {
-        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}\n`);
-      } else {
-        process.stdout.write(`\x1B[2K\n`);
-      }
-      lines++;
+      lines.push(i < helpLines.length ? `  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}` : "");
     }
   }
-
   return lines;
 }
 
@@ -151,15 +165,10 @@ export async function ask(
   const descHeight = options.some((o) => o.description) ? 1 : 0;
   const helpHeight = Math.max(0, ...options.map((o) => (o.help ? o.help.split("\n").length : 0)));
 
-  console.log();
-  console.log(`  ${pc.bold(question)}`);
-  console.log();
-
-  // Save cursor position after title, before content
-  process.stdout.write("\x1B7\x1B[?25l");
-
   let selected = 0;
-  renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
+
+  enterScreen();
+  renderScreen(buildAskLines(question, options, selected, hint, cellWidth, gridCols, descHeight, helpHeight));
 
   process.stdin.setRawMode(true);
   try {
@@ -209,13 +218,12 @@ export async function ask(
 
       if (newSelected !== selected) {
         selected = newSelected;
-        process.stdout.write("\x1B8\x1B[J");
-        renderAskView(options, selected, hint, cellWidth, gridCols, descHeight, helpHeight);
+        renderScreen(buildAskLines(question, options, selected, hint, cellWidth, gridCols, descHeight, helpHeight));
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    process.stdout.write("\x1B[?25h\x1B8\x1B[J");
+    exitScreen();
   }
 }
 
@@ -328,7 +336,13 @@ function navigateVertical(layouts: SectionLayout[], _total: number, selected: nu
   }
 }
 
-function renderDashboardView(
+interface DashboardContent {
+  lines: string[];
+  itemLineMap: Map<number, number>;
+}
+
+function buildDashboardLines(
+  title: string,
   sections: DashboardSection[],
   allItems: DashboardItem[],
   selected: number,
@@ -337,77 +351,85 @@ function renderDashboardView(
   valueHeight: number,
   helpHeight: number,
   statusLines: string[],
-): number {
+): DashboardContent {
+  const lines: string[] = [];
+  const itemLineMap = new Map<number, number>();
   const dividerWidth = Math.min(layoutWidth() - 4, 50);
   const divider = pc.dim("─".repeat(dividerWidth));
 
-  let lines = 0;
+  lines.push("");
+  lines.push(`  ${pc.bold(title)}`);
+  lines.push("");
 
   for (let s = 0; s < sections.length; s++) {
-    if (s > 0) { process.stdout.write("\n"); lines++; }
+    if (s > 0) lines.push("");
     if (sections[s].title) {
-      process.stdout.write(`  ${pc.bold(sections[s].title)}\n`);
-      process.stdout.write(`  ${divider}\n`);
-      lines += 2;
+      lines.push(`  ${pc.bold(sections[s].title)}`);
+      lines.push(`  ${divider}`);
     }
-
     const sectionLabels = sections[s].items.map((i) => i.label);
     const { start, cellWidth, gridCols } = layouts[s];
-    const sectionSelected = (selected >= start && selected < start + sectionLabels.length)
-      ? selected - start
-      : -1;
+    const sectionSelected = (selected >= start && selected < start + sectionLabels.length) ? selected - start : -1;
     const gridRows = renderItemGrid(sectionLabels, cellWidth, gridCols, sectionSelected);
-    for (const row of gridRows) {
-      process.stdout.write(`${row}\n`);
-      lines++;
+    for (let r = 0; r < gridRows.length; r++) {
+      const lineIdx = lines.length;
+      lines.push(gridRows[r]);
+      for (let c = 0; c < gridCols && (r * gridCols + c) < sectionLabels.length; c++) {
+        itemLineMap.set(start + r * gridCols + c, lineIdx);
+      }
     }
   }
 
-  // Hint line (includes action shortcuts)
-  process.stdout.write(`\n  ${pc.dim(hint)}\n`);
-  lines += 2;
+  lines.push("");
+  lines.push(`  ${pc.dim(hint)}`);
 
-  // Value of selected item
   if (valueHeight > 0) {
     const valueText = allItems[selected]?.value ?? "";
-    if (valueText) {
-      process.stdout.write(`  ${pc.dim(truncate(valueText, layoutWidth() - 2))}\n`);
-    } else {
-      process.stdout.write(`\x1B[2K\n`);
-    }
-    lines++;
+    lines.push(valueText ? `  ${pc.dim(truncate(valueText, layoutWidth() - 2))}` : "");
   }
 
-  // Blank line between value and help
-  if (valueHeight > 0 && helpHeight > 0) {
-    process.stdout.write("\n");
-    lines++;
-  }
+  if (valueHeight > 0 && helpHeight > 0) lines.push("");
 
-  // Help text of selected item
   if (helpHeight > 0) {
     const helpLines = allItems[selected]?.help?.split("\n") ?? [];
     for (let i = 0; i < helpHeight; i++) {
-      if (i < helpLines.length) {
-        process.stdout.write(`  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}\n`);
-      } else {
-        process.stdout.write(`\x1B[2K\n`);
-      }
-      lines++;
+      lines.push(i < helpLines.length ? `  ${pc.dim(truncate(helpLines[i], layoutWidth() - 2))}` : "");
     }
   }
 
-  // Status messages
   if (statusLines.length > 0) {
-    process.stdout.write("\n");
-    lines++;
-    for (const line of statusLines) {
-      process.stdout.write(`  ${line}\n`);
-      lines++;
-    }
+    lines.push("");
+    for (const line of statusLines) lines.push(`  ${line}`);
   }
 
-  return lines;
+  return { lines, itemLineMap };
+}
+
+function viewportSlice(lines: string[], scrollOffset: number, termRows: number): string[] {
+  if (lines.length <= termRows) return lines;
+  const hasUp = scrollOffset > 0;
+  const hasDown = scrollOffset + termRows < lines.length;
+  const available = hasDown ? termRows - 1 : termRows;
+  const visible = lines.slice(scrollOffset, scrollOffset + available);
+  if (hasUp) {
+    visible[0] = `  ${pc.dim("▲ more above")}`;
+  }
+  if (hasDown) {
+    visible.push(`  ${pc.dim("▼ more below")}`);
+  }
+  return visible;
+}
+
+function ensureVisible(itemLine: number, scrollOffset: number, termRows: number, totalLines: number): number {
+  if (totalLines <= termRows) return 0;
+  const margin = 2;
+  if (itemLine < scrollOffset + margin) {
+    return Math.max(0, itemLine - margin);
+  }
+  if (itemLine >= scrollOffset + termRows - margin) {
+    return Math.min(totalLines - termRows, itemLine - termRows + margin + 1);
+  }
+  return scrollOffset;
 }
 
 export async function askDashboard(
@@ -442,15 +464,9 @@ export async function askDashboard(
     if (idx >= 0) selected = idx;
   }
 
-  // Save cursor before title so we can restore + clear everything on exit
-  process.stdout.write("\x1B7");
-
-  console.log();
-  console.log(`  ${pc.bold(title)}`);
-  console.log();
-
   if (!process.stdin.isTTY) {
-    renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+    const content = buildDashboardLines(title, sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+    for (const line of content.lines) process.stdout.write(`${line}\n`);
     while (true) {
       const input = prompt(pc.dim(">"));
       if (input === null) return null;
@@ -461,8 +477,19 @@ export async function askDashboard(
     }
   }
 
-  process.stdout.write("\x1B[?25l");
-  renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+  let scrollOffset = 0;
+
+  function renderFull(): void {
+    const termRows = process.stdout.rows || 24;
+    const content = buildDashboardLines(title, sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+    const itemLine = content.itemLineMap.get(selected) ?? 0;
+    scrollOffset = ensureVisible(itemLine, scrollOffset, termRows, content.lines.length);
+    const visible = viewportSlice(content.lines, scrollOffset, termRows);
+    renderScreen(visible);
+  }
+
+  enterScreen();
+  renderFull();
 
   process.stdin.setRawMode(true);
   try {
@@ -517,15 +544,12 @@ export async function askDashboard(
 
       if (newSelected !== selected) {
         selected = newSelected;
-        process.stdout.write("\x1B8\x1B[J");
-        process.stdout.write(`\n  ${pc.bold(title)}\n\n`);
-        renderDashboardView(sections, allItems, selected, hint, layouts, valueHeight, helpHeight, statusLines);
+        renderFull();
       }
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Restore cursor to before title, clear everything, show cursor
-    process.stdout.write("\x1B[?25h\x1B8\x1B[J");
+    exitScreen();
   }
 }
 
@@ -895,11 +919,12 @@ export function askMultiSelect(
     if (onChange) onChange(selected);
   };
 
-  const render = (filtered: string[]) => {
-    // Restore cursor to before title, clear everything
-    process.stdout.write("\x1B8\x1B[J");
-    process.stdout.write(`\n  ${pc.bold(question)}\n\n`);
-    process.stdout.write(`  > ${filter}`);
+  const buildLines = (filtered: string[]): string[] => {
+    const lines: string[] = [];
+    lines.push("");
+    lines.push(`  ${pc.bold(question)}`);
+    lines.push("");
+    lines.push(`  > ${filter}`);
 
     if (filtered.length > 0) {
       const gridRows = Math.ceil(filtered.length / cols);
@@ -911,39 +936,32 @@ export function askMultiSelect(
           const item = filtered[idx];
           const check = selected.has(item) ? pc.green("[x]") : pc.dim("[ ]");
           const name = item.padEnd(maxItemLen);
-          if (selectMode && idx === selectIndex) {
-            line += `${check} ${pc.inverse(name)}  `;
-          } else {
-            line += `${check} ${name}  `;
-          }
+          line += (selectMode && idx === selectIndex) ? `${check} ${pc.inverse(name)}  ` : `${check} ${name}  `;
         }
-        process.stdout.write(`\n${line}`);
+        lines.push(line);
       }
     } else {
-      process.stdout.write(`\n  ${pc.dim("(no matches)")}`);
+      lines.push(`  ${pc.dim("(no matches)")}`);
     }
 
+    lines.push("");
     const hint = selectMode
       ? "Arrows navigate · Space/Enter toggle · a all · Esc filter · Backspace back"
       : "Type to filter · Tab/arrows select · a all · Backspace back";
-    process.stdout.write(`\n\n  ${pc.dim(hint)}`);
-
-    // Move cursor back to input line (within the just-rendered content)
-    const linesBelow = (filtered.length > 0 ? Math.ceil(filtered.length / cols) : 1) + 2;
-    process.stdout.write(`\x1B[${linesBelow}A`);
-    process.stdout.write(`\r`);
-    const col = promptWidth + filterCursor;
-    if (col > 0) process.stdout.write(`\x1B[${col}C`);
+    lines.push(`  ${pc.dim(hint)}`);
+    return lines;
   };
 
-  // Save cursor before title
-  process.stdout.write("\x1B7");
-
-  console.log();
-  console.log(`  ${pc.bold(question)}`);
-  console.log();
+  const render = (filtered: string[]) => {
+    renderScreen(buildLines(filtered));
+    // Position cursor on the filter input line (line 4 = row 4, col = promptWidth + filterCursor)
+    const col = promptWidth + filterCursor;
+    process.stdout.write(`\x1B[4;${col + 1}H`);
+    process.stdout.write("\x1B[?25h"); // show cursor for typing
+  };
 
   let filtered = getFiltered();
+  enterScreen();
   render(filtered);
 
   process.stdin.setRawMode(true);
@@ -1143,8 +1161,7 @@ export function askMultiSelect(
     }
   } finally {
     process.stdin.setRawMode(false);
-    // Restore cursor to before title, clear everything
-    process.stdout.write("\x1B8\x1B[J");
+    exitScreen();
   }
 }
 

@@ -634,6 +634,15 @@ function isSchemaBoolean(prop: SchemaProperty): boolean {
   return prop.type === "boolean" || (Array.isArray(prop.type) && prop.type.includes("boolean"));
 }
 
+function isSchemaNumber(prop: SchemaProperty): boolean {
+  const types = Array.isArray(prop.type) ? prop.type : [prop.type];
+  return types.includes("integer") || types.includes("number");
+}
+
+function isNullable(prop: SchemaProperty): boolean {
+  return Array.isArray(prop.type) && prop.type.includes("null");
+}
+
 function getSchemaTopLevel(schema: Record<string, unknown> | null): Record<string, SchemaProperty> {
   if (!schema) return {};
   const props = (schema as Record<string, Record<string, unknown>>).properties;
@@ -644,6 +653,23 @@ function getSchemaTopLevel(schema: Record<string, unknown> | null): Record<strin
     // Skip object sections (Config, ConnectionStrings, etc.) — only keep scalar top-level settings
     if (prop.type === "object" || (Array.isArray(prop.type) && prop.type.includes("object"))) continue;
     result[key] = prop;
+  }
+  return result;
+}
+
+function getSchemaObjectSections(schema: Record<string, unknown> | null): Record<string, SchemaProperty> {
+  if (!schema) return {};
+  const props = (schema as Record<string, Record<string, unknown>>).properties;
+  if (!props) return {};
+  const result: Record<string, SchemaProperty> = {};
+  for (const [key, value] of Object.entries(props)) {
+    const prop = value as SchemaProperty;
+    // Skip Config and ConnectionStrings — they have dedicated editors
+    if (key === "Config" || key === "ConnectionStrings") continue;
+    const types = Array.isArray(prop.type) ? prop.type : [prop.type ?? ""];
+    if (types.includes("object")) {
+      result[key] = prop;
+    }
   }
   return result;
 }
@@ -666,6 +692,69 @@ function extractDescriptions(schema: Record<string, unknown> | null): Record<str
   const props = (schema as Record<string, Record<string, unknown>>).properties;
   if (props) walk(props, "");
   return result;
+}
+
+// --- Schema property classification ---
+
+type PropertyClass = "boolean" | "enum" | "string" | "number" | "object" | "array-scalar" | "array-object" | "dictionary";
+
+function classifyProperty(prop: SchemaProperty): PropertyClass {
+  if (prop.enum) return "enum";
+  if (isSchemaBoolean(prop)) return "boolean";
+  if (isSchemaNumber(prop)) return "number";
+  const types = Array.isArray(prop.type) ? prop.type : [prop.type ?? "string"];
+  if (types.includes("array")) {
+    const items = (prop as Record<string, unknown>).items as Record<string, unknown> | undefined;
+    return items?.type === "object" || items?.properties ? "array-object" : "array-scalar";
+  }
+  if (types.includes("object")) {
+    const p = prop as Record<string, unknown>;
+    const hasProps = p.properties && typeof p.properties === "object" && Object.keys(p.properties as object).length > 0;
+    const hasAdditional = p.additionalProperties;
+    if (hasAdditional && !hasProps) return "dictionary";
+    return "object";
+  }
+  return "string";
+}
+
+function getNestedProperties(prop: SchemaProperty): Record<string, SchemaProperty> | null {
+  const p = (prop as Record<string, unknown>).properties;
+  return p && typeof p === "object" ? p as Record<string, SchemaProperty> : null;
+}
+
+function formatPropertyValue(value: unknown, prop: SchemaProperty): string {
+  if (value === undefined || value === null) {
+    const def = prop.default;
+    if (def === undefined || def === null) return "(not set)";
+    return `${def} (default)`;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    if (value.length <= 3) return `[${value.map(String).join(", ")}]`;
+    return `[${value.length} items]`;
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>);
+    if (keys.length === 0) return "{}";
+    return `{${keys.length} key${keys.length > 1 ? "s" : ""}}`;
+  }
+  return String(value);
+}
+
+function formatSectionStatus(value: unknown): string {
+  if (value === undefined || value === null) return "(defaults)";
+  if (typeof value !== "object") return String(value);
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (keys.length === 0) return "(defaults)";
+  return `${keys.length} key${keys.length > 1 ? "s" : ""} configured`;
+}
+
+function coerceArrayItem(value: string, prop: SchemaProperty): unknown {
+  const items = (prop as Record<string, unknown>).items as Record<string, unknown> | undefined;
+  const itemType = items?.type;
+  if (itemType === "integer") return Math.round(Number(value)) || 0;
+  if (itemType === "number") return Number(value) || 0;
+  return value;
 }
 
 // --- Connection testing ---
@@ -735,6 +824,20 @@ async function editSchemaItem(
   } else if (isSchemaBoolean(prop)) {
     const current = container[name] ?? prop.default;
     container[name] = !current;
+  } else if (isSchemaNumber(prop)) {
+    const current = container[name] ?? prop.default;
+    const value = askValue(name, current === null || current === undefined ? "" : String(current));
+    if (value === null) return false;
+    if (!value) {
+      if (isNullable(prop)) container[name] = null;
+      else delete container[name];
+    } else {
+      const num = Number(value);
+      if (!isNaN(num)) {
+        const isInt = prop.type === "integer" || (Array.isArray(prop.type) && prop.type.includes("integer"));
+        container[name] = isInt ? Math.round(num) : num;
+      }
+    }
   } else {
     const current = (container[name] as string) ?? "";
     const isPath = /file|path|dir/i.test(name);
@@ -747,6 +850,309 @@ async function editSchemaItem(
     }
   }
   return true;
+}
+
+// --- Generic section editors ---
+
+async function editArrayProperty(
+  container: Record<string, unknown>,
+  name: string,
+  prop: SchemaProperty,
+): Promise<boolean> {
+  let arr = Array.isArray(container[name]) ? [...(container[name] as unknown[])] : [];
+  let dirty = false;
+  let lastSelected: string | undefined;
+
+  while (true) {
+    const items = arr.map((v, i) => ({
+      key: `item.${i}`,
+      label: String(v),
+      value: "",
+    }));
+    items.push({ key: "+add", label: "+ Add", value: "" });
+
+    const sections = [{ title: "", items }];
+    const actions: { key: string; label: string }[] = [];
+    if (arr.length > 0) actions.push({ key: "c", label: "Clear all" });
+    actions.push({ key: "q", label: "Back" });
+
+    const choice = await askDashboard(name, sections, actions, { selected: lastSelected });
+
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      if (dirty) container[name] = arr;
+      return dirty;
+    }
+
+    if (choice.type === "action" && choice.key === "c") {
+      arr = [];
+      dirty = true;
+      continue;
+    }
+
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+      if (choice.key === "+add") {
+        const value = askValue("Value", "");
+        if (value !== null && value !== "") {
+          arr.push(coerceArrayItem(value, prop));
+          dirty = true;
+        }
+      } else if (choice.key.startsWith("item.")) {
+        const idx = parseInt(choice.key.slice(5), 10);
+        const action = await ask(String(arr[idx]), [
+          { label: "Edit", description: "Change this value" },
+          { label: "Remove", description: "Delete from list" },
+        ]);
+        if (action === 0) {
+          const value = askValue("Value", String(arr[idx]));
+          if (value !== null) {
+            if (value) {
+              arr[idx] = coerceArrayItem(value, prop);
+            } else {
+              arr.splice(idx, 1);
+              lastSelected = undefined;
+            }
+            dirty = true;
+          }
+        } else if (action === 1) {
+          arr.splice(idx, 1);
+          dirty = true;
+          lastSelected = undefined;
+        }
+      }
+    }
+  }
+}
+
+async function editDictionaryProperty(
+  container: Record<string, unknown>,
+  name: string,
+  prop: SchemaProperty,
+  descriptions: Record<string, string>,
+  parentPath: string,
+): Promise<boolean> {
+  const dict = (container[name] ?? {}) as Record<string, unknown>;
+  container[name] = dict;
+  let dirty = false;
+  let lastSelected: string | undefined;
+
+  const additionalProps = (prop as Record<string, unknown>).additionalProperties as Record<string, unknown> | undefined;
+  const isObjectValues = additionalProps?.type === "object" || additionalProps?.properties;
+
+  while (true) {
+    const items = Object.entries(dict).map(([k, v]) => ({
+      key: `key.${k}`,
+      label: k,
+      value: typeof v === "object" && v !== null ? `{${Object.keys(v as object).length} keys}` : String(v ?? ""),
+    }));
+    items.push({ key: "+add", label: "+ Add key", value: "" });
+
+    const sections = [{ title: "", items }];
+    const actions: { key: string; label: string }[] = [];
+    actions.push({ key: "q", label: "Back" });
+
+    const choice = await askDashboard(name, sections, actions, { selected: lastSelected });
+
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      return dirty;
+    }
+
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+      if (choice.key === "+add") {
+        const newKey = askValue("Key", "");
+        if (newKey === null || !newKey) continue;
+        if (isObjectValues) {
+          dict[newKey] = {};
+          dirty = true;
+          const valueSchema = additionalProps?.properties as Record<string, SchemaProperty> | undefined;
+          if (valueSchema) {
+            await editObjectProperties(dict[newKey] as Record<string, unknown>, valueSchema, descriptions, `${parentPath}.${name}`);
+          }
+        } else {
+          const value = askValue("Value", "");
+          if (value !== null && value !== "") {
+            dict[newKey] = value;
+            dirty = true;
+          }
+        }
+      } else if (choice.key.startsWith("key.")) {
+        const k = choice.key.slice(4);
+        if (isObjectValues) {
+          const valueSchema = additionalProps?.properties as Record<string, SchemaProperty> | undefined;
+          if (valueSchema) {
+            const objVal = (dict[k] ?? {}) as Record<string, unknown>;
+            dict[k] = objVal;
+            if (await editObjectProperties(objVal, valueSchema, descriptions, `${parentPath}.${name}`)) {
+              dirty = true;
+            }
+          }
+        } else {
+          const action = await ask(k, [
+            { label: "Edit", description: `Current: ${String(dict[k] ?? "")}` },
+            { label: "Remove", description: "Delete this key" },
+          ]);
+          if (action === 0) {
+            const value = askValue(k, String(dict[k] ?? ""));
+            if (value !== null) {
+              if (value) { dict[k] = value; } else { delete dict[k]; }
+              dirty = true;
+            }
+          } else if (action === 1) {
+            delete dict[k];
+            dirty = true;
+            lastSelected = undefined;
+          }
+        }
+      }
+    }
+  }
+}
+
+async function editObjectArrayProperty(
+  container: Record<string, unknown>,
+  name: string,
+  prop: SchemaProperty,
+  descriptions: Record<string, string>,
+  parentPath: string,
+): Promise<boolean> {
+  let arr = Array.isArray(container[name]) ? [...(container[name] as Record<string, unknown>[])] : [];
+  let dirty = false;
+  let lastSelected: string | undefined;
+
+  const items_schema = ((prop as Record<string, unknown>).items as Record<string, unknown> | undefined);
+  const itemProps = items_schema?.properties as Record<string, SchemaProperty> | undefined;
+
+  while (true) {
+    const items = arr.map((obj, i) => {
+      const displayName = String(obj.Name ?? obj.Type ?? obj.name ?? obj.type ?? `#${i + 1}`);
+      const parts: string[] = [];
+      for (const [k, v] of Object.entries(obj)) {
+        if (v !== null && v !== undefined && typeof v !== "object") parts.push(`${k}=${v}`);
+        if (parts.length >= 3) break;
+      }
+      return { key: `item.${i}`, label: displayName, value: parts.join(", ") };
+    });
+    items.push({ key: "+add", label: "+ Add", value: "" });
+
+    const sections = [{ title: "", items }];
+    const actions: { key: string; label: string }[] = [];
+    if (arr.length > 0) actions.push({ key: "r", label: "Remove last" });
+    actions.push({ key: "q", label: "Back" });
+
+    const choice = await askDashboard(name, sections, actions, { selected: lastSelected });
+
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      if (dirty) container[name] = arr;
+      return dirty;
+    }
+
+    if (choice.type === "action" && choice.key === "r" && arr.length > 0) {
+      arr.pop();
+      dirty = true;
+      lastSelected = undefined;
+      continue;
+    }
+
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+      if (choice.key === "+add") {
+        const newObj: Record<string, unknown> = {};
+        if (itemProps) {
+          for (const [k, v] of Object.entries(itemProps)) {
+            if (v.default !== undefined) newObj[k] = v.default;
+          }
+        }
+        arr.push(newObj);
+        dirty = true;
+        if (itemProps) {
+          await editObjectProperties(newObj, itemProps, descriptions, `${parentPath}.${name}`);
+        }
+      } else if (choice.key.startsWith("item.")) {
+        const idx = parseInt(choice.key.slice(5), 10);
+        if (itemProps) {
+          if (await editObjectProperties(arr[idx], itemProps, descriptions, `${parentPath}.${name}`)) {
+            dirty = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+async function editObjectProperties(
+  obj: Record<string, unknown>,
+  schemaProps: Record<string, SchemaProperty>,
+  descriptions: Record<string, string>,
+  parentPath: string,
+): Promise<boolean> {
+  let dirty = false;
+  let lastSelected: string | undefined;
+
+  while (true) {
+    const items = Object.entries(schemaProps).map(([key, prop]) => {
+      const value = obj[key];
+      const descPath = parentPath ? `${parentPath}.${key}` : key;
+      return {
+        key,
+        label: key,
+        value: formatPropertyValue(value, prop),
+        help: descriptions[descPath],
+      };
+    });
+
+    const sections = [{ title: "", items }];
+    const actions = [{ key: "q", label: "Back" }];
+    const title = parentPath.split(".").pop() || "Settings";
+
+    const choice = await askDashboard(title, sections, actions, { selected: lastSelected });
+
+    if (choice === null || (choice.type === "action" && choice.key === "q")) {
+      return dirty;
+    }
+
+    if (choice.type === "item") {
+      lastSelected = choice.key;
+      const prop = schemaProps[choice.key];
+      if (!prop) continue;
+
+      const propType = classifyProperty(prop);
+
+      switch (propType) {
+        case "boolean":
+        case "enum":
+        case "string":
+        case "number": {
+          if (await editSchemaItem(obj, choice.key, prop)) dirty = true;
+          break;
+        }
+        case "object": {
+          const nestedSchema = getNestedProperties(prop);
+          if (nestedSchema) {
+            const nestedObj = (obj[choice.key] ?? {}) as Record<string, unknown>;
+            obj[choice.key] = nestedObj;
+            if (await editObjectProperties(nestedObj, nestedSchema, descriptions, `${parentPath}.${choice.key}`)) {
+              dirty = true;
+            }
+            if (Object.keys(nestedObj).length === 0) delete obj[choice.key];
+          }
+          break;
+        }
+        case "array-scalar": {
+          if (await editArrayProperty(obj, choice.key, prop)) dirty = true;
+          break;
+        }
+        case "array-object": {
+          if (await editObjectArrayProperty(obj, choice.key, prop, descriptions, parentPath)) dirty = true;
+          break;
+        }
+        case "dictionary": {
+          if (await editDictionaryProperty(obj, choice.key, prop, descriptions, parentPath)) dirty = true;
+          break;
+        }
+      }
+    }
+  }
 }
 
 function buildConnectionDashboard(parsed: ParsedConnectionString) {
@@ -1030,6 +1436,7 @@ function buildNpgsqlRestDashboardSections(
   configData: Record<string, unknown>,
   topLevelProps: Record<string, SchemaProperty>,
   configProps: Record<string, SchemaProperty>,
+  objectSections: Record<string, SchemaProperty>,
   descriptions: Record<string, string>,
 ) {
   const sections: { title: string; items: { key: string; label: string; value: string; help?: string }[] }[] = [];
@@ -1079,6 +1486,20 @@ function buildNpgsqlRestDashboardSections(
   });
   sections.push({ title: "Connection Strings", items: connItems });
 
+  // Object Sections
+  const sectionNames = Object.keys(objectSections);
+  if (sectionNames.length > 0) {
+    sections.push({
+      title: "Sections",
+      items: sectionNames.map((name) => ({
+        key: `Section.${name}`,
+        label: name,
+        value: formatSectionStatus(configData[name]),
+        help: descriptions[name],
+      })),
+    });
+  }
+
   return sections;
 }
 
@@ -1121,8 +1542,9 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
     const descriptions = extractDescriptions(schema);
     const topLevelProps = getSchemaTopLevel(schema);
     const configProps = getSchemaSection(schema, "Config");
+    const objectSections = getSchemaObjectSections(schema);
 
-    const sections = buildNpgsqlRestDashboardSections(result.data, topLevelProps, configProps, descriptions);
+    const sections = buildNpgsqlRestDashboardSections(result.data, topLevelProps, configProps, objectSections, descriptions);
 
     const actions: { key: string; label: string }[] = [];
     if (existing.length > 1) {
@@ -1190,6 +1612,21 @@ async function editNpgsqlRestDashboard(config: PgdevConfig): Promise<void> {
           result.data.Config = configSection;
           await writeJsonConfig(fullPath, result.data, result.header, descriptions);
           lastStatus = `Saved ${chosenFile.path}`;
+        }
+      }
+    } else if (choice.key.startsWith("Section.")) {
+      const sectionName = choice.key.slice("Section.".length);
+      const sectionProp = objectSections[sectionName];
+      if (sectionProp) {
+        const sectionSchema = getNestedProperties(sectionProp);
+        if (sectionSchema) {
+          const sectionData = (result.data[sectionName] ?? {}) as Record<string, unknown>;
+          result.data[sectionName] = sectionData;
+          if (await editObjectProperties(sectionData, sectionSchema, descriptions, sectionName)) {
+            if (Object.keys(sectionData).length === 0) delete result.data[sectionName];
+            await writeJsonConfig(fullPath, result.data, result.header, descriptions);
+            lastStatus = `Saved ${chosenFile.path}`;
+          }
         }
       }
     } else {
