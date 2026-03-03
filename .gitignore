@@ -7,8 +7,9 @@ CLAUDE.md
 pgdev.local.toml
 pgdev.toml
 config
-test
+/test
 scrap
 .ENV
+test.env
 
 ./config/local.json

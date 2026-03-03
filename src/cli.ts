@@ -222,20 +222,23 @@ async function printStatus(): Promise<void> {
 
   // Connection
   console.log();
+  const connQuery = "select rolsuper, current_user, current_database(), version() from pg_roles where rolname = current_user";
   const s2 = spinner("Testing pgdev connection...");
   const connFields = await resolveConnection(config);
   if (typeof connFields === "string") {
     s2.stop();
     console.log(`  ${pc.dim("○")} ${connFields}`);
   } else {
-    const serverResult = await runPsqlQuery(config, "SELECT version()");
+    const serverResult = await runPsqlQuery(config, connQuery);
     s2.stop();
     const connLabel = isSharedConnection(config.connection)
       ? `shared from ${config.connection.config_file}`
       : `${connFields.host}:${connFields.port}/${connFields.database}`;
     if (serverResult.ok && serverResult.rows.length > 0) {
-      console.log(`  ${pc.green("✓")} ${connLabel}`);
-      console.log(`    ${pc.dim(serverResult.rows[0])}`);
+      const [rolsuper, user, db, version] = serverResult.rows[0].split("|");
+      const superTag = rolsuper === "t" ? pc.yellow(" superuser") : "";
+      console.log(`  ${pc.green("✓")} ${connLabel}  ${pc.dim(`${user}@${db}`)}${superTag}`);
+      console.log(`    ${pc.dim(version)}`);
     } else if (!serverResult.ok) {
       console.log(`  ${pc.red("✗")} ${connLabel}`);
       console.log(`    ${pc.dim(serverResult.error)}`);
@@ -331,7 +334,8 @@ async function printStatus(): Promise<void> {
 
   // Connections from config files
   const s4 = spinner("Testing NpgsqlRest connections...");
-  const connResults: { source: string; ok: boolean; version?: string; error?: string }[] = [];
+  const nrConnQuery = "select rolsuper, current_user, current_database(), version() from pg_roles where rolname = current_user";
+  const connResults: { source: string; ok: boolean; rolsuper?: string; user?: string; db?: string; version?: string; error?: string }[] = [];
 
   for (const file of allFiles) {
     if (!file.exists) continue;
@@ -374,7 +378,7 @@ async function printStatus(): Promise<void> {
       }
 
       const psqlParts = splitCommand(config.tools.psql);
-      const cmd = [...psqlParts, "-h", fields.host, "-p", fields.port, "-d", fields.database, "-U", fields.username, "-t", "-A", "-c", "SELECT version()"];
+      const cmd = [...psqlParts, "-h", fields.host, "-p", fields.port, "-d", fields.database, "-U", fields.username, "-t", "-A", "-c", nrConnQuery];
       try {
         const proc = Bun.spawn(cmd, {
           stdin: "pipe", stdout: "pipe", stderr: "pipe",
@@ -383,7 +387,8 @@ async function printStatus(): Promise<void> {
         const stdout = await new Response(proc.stdout).text();
         const exitCode = await proc.exited;
         if (exitCode === 0) {
-          connResults.push({ source: `${file.path} → ${connName}`, ok: true, version: stdout.trim() });
+          const [rolsuper, user, db, version] = stdout.trim().split("|");
+          connResults.push({ source: `${file.path} → ${connName}`, ok: true, rolsuper, user, db, version });
         } else {
           const stderr = await new Response(proc.stderr).text();
           connResults.push({ source: `${file.path} → ${connName}`, ok: false, error: stderr.trim().split("\n")[0] });
@@ -400,7 +405,8 @@ async function printStatus(): Promise<void> {
     console.log();
     for (const r of connResults) {
       if (r.ok) {
-        console.log(`  ${pc.green("✓")} ${r.source}`);
+        const superTag = r.rolsuper === "t" ? pc.yellow(" superuser") : "";
+        console.log(`  ${pc.green("✓")} ${r.source}  ${pc.dim(`${r.user}@${r.db}`)}${superTag}`);
         if (r.version) console.log(`    ${pc.dim(r.version)}`);
       } else {
         console.log(`  ${pc.red("✗")} ${r.source}`);

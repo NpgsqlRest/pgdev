@@ -1,10 +1,65 @@
 import { resolve } from "node:path";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { type PgdevConfig } from "../config.ts";
 import { resolveConnection } from "./exec.ts";
 import { splitCommand } from "../cli.ts";
 import { error, success, pc, formatCmd } from "../utils/terminal.ts";
+
+function cleanRestoreOutput(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) =>
+      !/^\\(un)?restrict\b/.test(line) &&
+      !/^SET\s+\w+/.test(line) &&
+      !/^SELECT\s+pg_catalog\.set_config\b/.test(line) &&
+      !/^ALTER\s+(FUNCTION|PROCEDURE)\s+.+\s+OWNER\s+TO\b/.test(line),
+    )
+    .join("\n");
+}
+
+interface RoutineGroup {
+  name: string;
+  tocLines: string[];
+}
+
+export function parseRoutineGroups(tocOutput: string): RoutineGroup[] {
+  const groups = new Map<string, string[]>();
+  const groupOrder: string[] = [];
+
+  for (const line of tocOutput.split("\n")) {
+    if (line.startsWith(";") || !line.trim()) continue;
+
+    // Routine definition: "1290; 1255 586699 FUNCTION mathmodule auth_login(...) legendea"
+    const routineMatch = line.match(/^\d+;\s+1255\s+\d+\s+(?:FUNCTION|PROCEDURE)\s+\S+\s+(\S+)\(/);
+    if (routineMatch) {
+      const name = routineMatch[1];
+      if (!groups.has(name)) {
+        groups.set(name, []);
+        groupOrder.push(name);
+      }
+      groups.get(name)!.push(line);
+      continue;
+    }
+
+    // COMMENT on routine: "5801; 0 0 COMMENT mathmodule FUNCTION auth_login(...) legendea"
+    const commentMatch = line.match(/^\d+;\s+0\s+0\s+COMMENT\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
+    if (commentMatch) {
+      const name = commentMatch[1];
+      groups.get(name)?.push(line);
+      continue;
+    }
+
+    // ACL on routine: "5800; 0 0 ACL mathmodule FUNCTION auth_login(...) legendea"
+    const aclMatch = line.match(/^\d+;\s+0\s+0\s+ACL\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
+    if (aclMatch) {
+      const name = aclMatch[1];
+      groups.get(name)?.push(line);
+    }
+  }
+
+  return groupOrder.map((name) => ({ name, tocLines: groups.get(name)! }));
+}
 
 export async function syncCommand(config: PgdevConfig): Promise<void> {
   const migrationsDir = config.project.migrations_dir;
@@ -79,7 +134,7 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
 
     const filteredToc = listStdout
       .split("\n")
-      .filter((line) => !/\bFUNCTION\b|\bPROCEDURE\b|\bAGGREGATE\b/.test(line))
+      .filter((line) => !/\bFUNCTION\b|\bPROCEDURE\b/.test(line))
       .join("\n");
 
     const tocFile = resolve(tmpdir(), `pgdev-toc-${Date.now()}.list`);
@@ -105,20 +160,63 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
         process.exit(restoreExit);
       }
 
-      const cleaned = restoreStdout
-        .split("\n")
-        .filter((line) =>
-          !/^\\(un)?restrict\b/.test(line) &&
-          !/^SET\s+\w+/.test(line) &&
-          !/^SELECT\s+pg_catalog\.set_config\b/.test(line),
-        )
-        .join("\n");
+      const cleaned = cleanRestoreOutput(restoreStdout);
 
       const outPath = resolve(fullDir, "schema.sql");
       await Bun.write(outPath, cleaned);
       console.log(success(`Schema written to ${pc.bold(outPath)}`));
     } finally {
       try { unlinkSync(tocFile); } catch {}
+    }
+
+    // Step 4: Extract routines to individual files
+    const routinesDir = config.project.routines_dir;
+    if (routinesDir) {
+      const fullRoutinesDir = resolve(process.cwd(), routinesDir);
+      mkdirSync(fullRoutinesDir, { recursive: true });
+
+      const routineGroups = parseRoutineGroups(listStdout);
+
+      if (routineGroups.length > 0) {
+        const routineTocFile = resolve(tmpdir(), `pgdev-routine-toc-${Date.now()}.list`);
+        try {
+          let filesWritten = 0;
+          for (const group of routineGroups) {
+            await Bun.write(routineTocFile, group.tocLines.join("\n") + "\n");
+
+            const rCmd = [...pgRestoreParts, "-L", routineTocFile, "-f", "-", dumpFile];
+
+            if (config.verbose) {
+              console.error(pc.cyan(formatCmd(rCmd)));
+            }
+
+            const rProc = Bun.spawn(rCmd, { stdout: "pipe", stderr: "pipe", env });
+            const [rStdout, rStderr, rExit] = await Promise.all([
+              new Response(rProc.stdout).text(),
+              new Response(rProc.stderr).text(),
+              rProc.exited,
+            ]);
+
+            if (rExit !== 0) {
+              console.error(error(`pg_restore failed for ${group.name}: ${rStderr.trim()}`));
+              continue;
+            }
+
+            const routineSql = cleanRestoreOutput(rStdout);
+            const outFile = resolve(fullRoutinesDir, `${group.name}.sql`);
+            await Bun.write(outFile, routineSql);
+            filesWritten++;
+
+            if (config.verbose) {
+              console.error(pc.dim(`  ${group.name}.sql`));
+            }
+          }
+
+          console.log(success(`Routines written to ${pc.bold(routinesDir + "/")} (${filesWritten} files)`));
+        } finally {
+          try { unlinkSync(routineTocFile); } catch {}
+        }
+      }
     }
   } finally {
     try { unlinkSync(dumpFile); } catch {}
