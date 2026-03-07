@@ -146,6 +146,130 @@ export async function runPsqlQuery(config: PgdevConfig, sql: string): Promise<Ps
   }
 }
 
+export type PsqlCsvResult = { ok: true; rows: Record<string, string>[]; cmd: string } | { ok: false; error: string; cmd: string };
+
+export async function runPsqlCsvQuery(config: PgdevConfig, sql: string): Promise<PsqlCsvResult> {
+  const fields = await resolveConnection(config);
+  if (typeof fields === "string") return { ok: false, error: fields, cmd: "" };
+  if (!fields.database) return { ok: false, error: "No database specified in connection.", cmd: "" };
+
+  const psqlParts = splitCommand(config.tools.psql);
+  const cmd = [
+    ...psqlParts,
+    "-h", fields.host,
+    "-p", fields.port,
+    "-d", fields.database,
+    "-U", fields.username,
+    "--csv",
+    "-c", sql,
+  ];
+
+  const cmdStr = formatCmd(cmd);
+
+  try {
+    const proc = Bun.spawn(cmd, {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, PGPASSWORD: fields.password },
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+      const stderr = await new Response(proc.stderr).text();
+      return { ok: false, error: stderr.trim() || "psql exited with code " + exitCode, cmd: cmdStr };
+    }
+    const rows = parseCsvOutput(stdout.trim());
+    return { ok: true, rows, cmd: cmdStr };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), cmd: cmdStr };
+  }
+}
+
+/** Parse psql --csv output into array of records. Handles quoted fields with commas/newlines. */
+function parseCsvOutput(output: string): Record<string, string>[] {
+  if (!output) return [];
+
+  const lines = parseCsvLines(output);
+  if (lines.length < 2) return [];
+
+  const headers = lines[0];
+  return lines.slice(1).map((fields) => {
+    const row: Record<string, string> = {};
+    for (let i = 0; i < headers.length; i++) {
+      row[headers[i]] = fields[i] ?? "";
+    }
+    return row;
+  });
+}
+
+/** Split CSV text into rows of fields, handling quoted fields with embedded newlines/commas. */
+function parseCsvLines(text: string): string[][] {
+  const rows: string[][] = [];
+  let i = 0;
+
+  while (i < text.length) {
+    const { fields, nextPos } = parseCsvRow(text, i);
+    rows.push(fields);
+    i = nextPos;
+  }
+
+  return rows;
+}
+
+function parseCsvRow(text: string, start: number): { fields: string[]; nextPos: number } {
+  const fields: string[] = [];
+  let i = start;
+
+  while (i <= text.length) {
+    if (i === text.length || text[i] === "\n") {
+      fields.push("");
+      i++;
+      break;
+    }
+
+    if (text[i] === '"') {
+      // Quoted field
+      let value = "";
+      i++; // skip opening quote
+      while (i < text.length) {
+        if (text[i] === '"') {
+          if (i + 1 < text.length && text[i + 1] === '"') {
+            value += '"';
+            i += 2;
+          } else {
+            i++; // skip closing quote
+            break;
+          }
+        } else {
+          value += text[i];
+          i++;
+        }
+      }
+      fields.push(value);
+    } else {
+      // Unquoted field
+      let value = "";
+      while (i < text.length && text[i] !== "," && text[i] !== "\n") {
+        value += text[i];
+        i++;
+      }
+      fields.push(value);
+    }
+
+    if (i < text.length && text[i] === ",") {
+      i++; // skip comma
+      continue;
+    }
+    if (i < text.length && text[i] === "\n") {
+      i++; // skip newline
+    }
+    break;
+  }
+
+  return { fields, nextPos: i };
+}
+
 export async function execCommand(config: PgdevConfig, sql: string): Promise<void> {
   const { cmd, env } = await buildPsqlArgs(config);
   cmd.push("-c", sql);

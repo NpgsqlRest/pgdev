@@ -17,6 +17,12 @@ export interface RoutineReturn {
   table: TableColumn[] | null;
 }
 
+export interface RoutineGrant {
+  privilege: "EXECUTE" | "ALL";
+  grantee: string;
+  isGrant: boolean; // true = GRANT, false = REVOKE
+}
+
 export interface ParsedRoutine {
   name: string;
   type: "function" | "procedure";
@@ -26,6 +32,7 @@ export interface ParsedRoutine {
   attributes: string[];
   body: string | null;
   comment: string | null;
+  grants: RoutineGrant[];
 }
 
 /**
@@ -388,6 +395,40 @@ function parseComments(commentStripped: string): Map<string, string> {
 }
 
 /**
+ * Match GRANT/REVOKE on FUNCTION/PROCEDURE.
+ * GRANT EXECUTE ON FUNCTION [schema.]name(params) TO role;
+ * REVOKE ALL ON FUNCTION [schema.]name(params) FROM role;
+ */
+const GRANT_REVOKE_RE =
+  /\b(GRANT|REVOKE)\s+(EXECUTE|ALL(?:\s+PRIVILEGES)?)\s+ON\s+(FUNCTION|PROCEDURE)\s+(?:([a-zA-Z_]\w*)\.)?([a-zA-Z_]\w*)\s*\(([^)]*)\)\s+(?:TO|FROM)\s+([^;]+?)\s*;/gi;
+
+function parseGrants(commentStripped: string): Map<string, RoutineGrant[]> {
+  const map = new Map<string, RoutineGrant[]>();
+  let m: RegExpExecArray | null;
+  const re = new RegExp(GRANT_REVOKE_RE.source, GRANT_REVOKE_RE.flags);
+  while ((m = re.exec(commentStripped)) !== null) {
+    const isGrant = m[1].toUpperCase() === "GRANT";
+    const privilege = m[2].toUpperCase().startsWith("ALL") ? "ALL" : "EXECUTE";
+    const type = m[3].toLowerCase();
+    const schema = m[4] ?? "";
+    const name = m[5];
+    const params = m[6]
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => parseOneParam(p).type.toLowerCase())
+      .join(",");
+    const grantee = m[7].trim();
+
+    const key = `${type}:${schema}.${name}(${params})`;
+    const list = map.get(key) ?? [];
+    list.push({ privilege: privilege as "EXECUTE" | "ALL", grantee, isGrant });
+    map.set(key, list);
+  }
+  return map;
+}
+
+/**
  * Build a comment lookup key from a ParsedRoutine.
  */
 function commentKey(r: { type: string; schema: string | null; name: string; parameters: RoutineParameter[] }): string {
@@ -397,12 +438,13 @@ function commentKey(r: { type: string; schema: string | null; name: string; para
   return `${r.type}:${r.schema ?? ""}.${r.name}(${params})`;
 }
 
-export function parseRoutines(content: string): ParsedRoutine[] {
+export function parseRoutines(content: string, options?: { grants?: boolean }): ParsedRoutine[] {
   if (!content.trim()) return [];
 
   const commentStripped = stripComments(content);
   const cleaned = stripDollarBodies(commentStripped);
   const comments = parseComments(commentStripped);
+  const grantMap = options?.grants ? parseGrants(commentStripped) : null;
   const routines: ParsedRoutine[] = [];
 
   let match: RegExpExecArray | null;
@@ -424,10 +466,14 @@ export function parseRoutines(content: string): ParsedRoutine[] {
       attributes,
       body,
       comment: null,
+      grants: [],
     };
 
     const key = commentKey(routine);
     routine.comment = comments.get(key) ?? null;
+    if (grantMap) {
+      routine.grants = grantMap.get(key) ?? [];
+    }
 
     routines.push(routine);
   }

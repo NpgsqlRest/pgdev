@@ -1,6 +1,36 @@
-import type { ParsedRoutine } from "./routine.ts";
+import type { ParsedRoutine, RoutineGrant } from "./routine.ts";
 import type { CatalogRoutine } from "./catalog.ts";
 import { bodyHash } from "./catalog.ts";
+
+/**
+ * Map of common PostgreSQL type aliases to their canonical names
+ * (as returned by format_type()).
+ */
+const TYPE_ALIASES: Record<string, string> = {
+  int: "integer",
+  int4: "integer",
+  int2: "smallint",
+  int8: "bigint",
+  float4: "real",
+  float8: "double precision",
+  bool: "boolean",
+  varchar: "character varying",
+  char: "character",
+  timestamptz: "timestamp with time zone",
+  timetz: "time with time zone",
+  serial: "integer",
+  serial4: "integer",
+  bigserial: "bigint",
+  serial8: "bigint",
+  smallserial: "smallint",
+  serial2: "smallint",
+};
+
+/** Normalize a SQL type to its canonical form (as returned by format_type). */
+export function normalizeType(type: string): string {
+  const lower = type.toLowerCase().trim();
+  return TYPE_ALIASES[lower] ?? lower;
+}
 
 /**
  * PostgreSQL default values for routine attributes when not explicitly specified.
@@ -73,8 +103,8 @@ export function attributesToCatalog(parsed: ParsedRoutine): ExpectedAttributes {
   const costAttr = attrs.find((a) => /^COST\s/i.test(a));
   const cost = costAttr ? Number(costAttr.split(/\s+/)[1]) : PG_DEFAULTS.cost;
 
-  // Rows — default depends on whether function returns SETOF
-  const isSetof = parsed.returns?.setof ?? false;
+  // Rows — default depends on whether function returns SETOF (RETURNS TABLE is also setof)
+  const isSetof = (parsed.returns?.setof ?? false) || parsed.returns?.table != null;
   const rowsAttr = attrs.find((a) => /^ROWS\s/i.test(a));
   const rows = rowsAttr
     ? Number(rowsAttr.split(/\s+/)[1])
@@ -101,7 +131,11 @@ export function attributesToCatalog(parsed: ParsedRoutine): ExpectedAttributes {
  * Compare a parsed routine (from SQL file) with a catalog routine (from pg_catalog).
  * Returns true if they differ and the database needs updating.
  */
-export function routinesDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean {
+export interface DiffOptions {
+  ignoreBodyWhitespace?: boolean;
+}
+
+export function routinesDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine, options?: DiffOptions): boolean {
   // Type
   if (parsed.type !== catalog.type) return true;
 
@@ -109,7 +143,7 @@ export function routinesDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): 
   if (parsed.parameters.length !== catalog.parameters.length) return true;
   for (let i = 0; i < parsed.parameters.length; i++) {
     if (parsed.parameters[i].name !== catalog.parameters[i].name) return true;
-    if (parsed.parameters[i].type.toLowerCase() !== catalog.parameters[i].type.toLowerCase())
+    if (normalizeType(parsed.parameters[i].type) !== normalizeType(catalog.parameters[i].type))
       return true;
   }
 
@@ -117,7 +151,7 @@ export function routinesDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): 
   if (returnsDiffer(parsed, catalog)) return true;
 
   // Body
-  if (bodyDiffers(parsed.body, catalog.body)) return true;
+  if (bodyDiffers(parsed.body, catalog.body, options?.ignoreBodyWhitespace)) return true;
 
   // Attributes
   if (attributesDiffer(parsed, catalog)) return true;
@@ -134,6 +168,74 @@ export function commentsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): 
   const pc = parsed.comment ?? null;
   const cc = catalog.comment ?? null;
   return pc !== cc;
+}
+
+/**
+ * Convert parsed GRANT/REVOKE statements into a set of PostgreSQL ACL entries.
+ * pg_dump always outputs REVOKE ALL first, then explicit GRANTs, producing
+ * a deterministic final state. We replay the statements in order.
+ *
+ * ACL entry format: "grantee=privs/grantor" where:
+ *   - X = EXECUTE
+ *   - empty grantee = PUBLIC
+ *   - * suffix = WITH GRANT OPTION
+ */
+export function grantsToAcl(grants: RoutineGrant[], owner: string): string[] {
+  // Track who has EXECUTE. Start empty (pg_dump always begins with REVOKE ALL)
+  const acl = new Map<string, boolean>();
+
+  for (const g of grants) {
+    const grantee = g.grantee.toUpperCase() === "PUBLIC" ? "" : g.grantee;
+    if (g.isGrant) {
+      acl.set(grantee, true);
+    } else {
+      // REVOKE
+      if (g.grantee.toUpperCase() === "PUBLIC" && g.privilege === "ALL") {
+        // REVOKE ALL FROM PUBLIC — clear PUBLIC
+        acl.delete("");
+      } else {
+        acl.delete(grantee);
+      }
+    }
+  }
+
+  return [...acl.keys()]
+    .sort()
+    .map((grantee) => `${grantee}=X/${owner}`);
+}
+
+/**
+ * Compare grants/ACLs between a parsed routine and a catalog routine.
+ * Returns true if they differ. Separate from routinesDiffer because
+ * grant changes use GRANT/REVOKE statements (no routine re-creation needed).
+ */
+export function grantsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean {
+  // If no grants parsed and catalog has null ACL, they match (default permissions)
+  if (parsed.grants.length === 0 && catalog.acl == null) return false;
+
+  // If parsed has no grants but catalog has explicit ACL (or vice versa)
+  if (parsed.grants.length === 0 && catalog.acl != null) return true;
+  if (parsed.grants.length > 0 && catalog.acl == null) return true;
+
+  // Extract owner from catalog ACL (format: "grantee=privs/grantor")
+  const ownerMatch = catalog.acl![0]?.match(/\/(\w+)$/);
+  const owner = ownerMatch ? ownerMatch[1] : "";
+
+  // Filter out owner's self-grant from catalog ACL — the owner always retains
+  // EXECUTE and pg_dump includes an explicit "GRANT ... TO owner" line, but
+  // user-written SQL typically omits it. Compare only non-owner entries.
+  const ownerEntry = `${owner}=X/${owner}`;
+  const actual = [...(catalog.acl ?? [])]
+    .filter((a) => a !== ownerEntry)
+    .sort();
+
+  const expected = grantsToAcl(parsed.grants, owner);
+
+  if (expected.length !== actual.length) return true;
+  for (let i = 0; i < expected.length; i++) {
+    if (expected[i] !== actual[i]) return true;
+  }
+  return false;
 }
 
 function returnsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean {
@@ -153,15 +255,15 @@ function returnsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean 
 
   // Scalar / SETOF type
   if (pr.setof !== cr.setof) return true;
-  if (pr.type?.toLowerCase() !== cr.type?.toLowerCase()) return true;
+  if (normalizeType(pr.type ?? "") !== normalizeType(cr.type ?? "")) return true;
 
   return false;
 }
 
-function bodyDiffers(parsedBody: string | null, catalogBody: string | null): boolean {
+function bodyDiffers(parsedBody: string | null, catalogBody: string | null, ignoreWhitespace = false): boolean {
   if (parsedBody == null && catalogBody == null) return false;
   if (parsedBody == null || catalogBody == null) return true;
-  return bodyHash(parsedBody) !== bodyHash(catalogBody);
+  return bodyHash(parsedBody, ignoreWhitespace) !== bodyHash(catalogBody, ignoreWhitespace);
 }
 
 function attributesDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean {

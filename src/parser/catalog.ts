@@ -1,5 +1,5 @@
 import { type PgdevConfig } from "../config.ts";
-import { runPsqlQuery } from "../commands/exec.ts";
+import { runPsqlCsvQuery } from "../commands/exec.ts";
 
 export interface CatalogRoutine {
   schema: string;
@@ -18,6 +18,7 @@ export interface CatalogRoutine {
   rows: number;
   config: string[];
   comment: string | null;
+  acl: string[] | null;
 }
 
 /** Raw row shape returned by catalogMetadataQuery(). */
@@ -42,6 +43,7 @@ export interface CatalogRow {
   rows: number;
   config: string[] | null;
   comment: string | null;
+  acl: string[] | null;
 }
 
 const VOLATILITY_MAP: Record<string, "immutable" | "stable" | "volatile"> = {
@@ -78,7 +80,8 @@ export function catalogMetadataQuery(schemas: string[]): string {
     "  p.procost::real AS cost,",
     "  p.prorows::real AS rows,",
     "  p.proconfig AS config,",
-    "  obj_description(p.oid, 'pg_proc') AS comment",
+    "  obj_description(p.oid, 'pg_proc') AS comment,",
+    "  p.proacl AS acl",
     "FROM pg_proc p",
     "JOIN pg_namespace n ON n.oid = p.pronamespace",
     "JOIN pg_language l ON l.oid = p.prolang",
@@ -112,6 +115,7 @@ export function parseCatalogRows(rows: CatalogRow[]): CatalogRoutine[] {
         rows: row.rows,
         config: row.config ?? [],
         comment: row.comment ?? null,
+        acl: row.acl ?? null,
       };
       map.set(row.routine_oid, routine);
     }
@@ -141,53 +145,56 @@ export function normalizeBody(body: string): string {
     .trim();
 }
 
+/** Normalize body ignoring all whitespace: lowercase, strip non-printable, remove all whitespace. */
+export function normalizeBodyNoWhitespace(body: string): string {
+  return body
+    .toLowerCase()
+    .replace(/[^\x20-\x7e]/g, "")
+    .replace(/\s/g, "")
+    .trim();
+}
+
 /** Hash a normalized body string (SHA-256, hex). */
-export function bodyHash(body: string): string {
+export function bodyHash(body: string, ignoreWhitespace = false): string {
   const hasher = new Bun.CryptoHasher("sha256");
-  hasher.update(normalizeBody(body));
+  hasher.update(ignoreWhitespace ? normalizeBodyNoWhitespace(body) : normalizeBody(body));
   return hasher.digest("hex");
 }
 
-/** Production execution via psql. */
+/** Production execution via psql (CSV mode for safe parsing of bodies containing pipes/newlines). */
 export async function fetchCatalogMetadata(config: PgdevConfig): Promise<CatalogRoutine[]> {
   const schemas = config.project.schemas;
   if (schemas.length === 0) return [];
 
   const sql = catalogMetadataQuery(schemas);
-  const result = await runPsqlQuery(config, sql);
+  const result = await runPsqlCsvQuery(config, sql);
   if (!result.ok) {
     throw new Error(`Catalog query failed: ${result.error}`);
   }
 
-  const rows: CatalogRow[] = result.rows.map((line) => {
-    const [
-      schema, name, type, oid, ord, paramName, paramType,
-      returnType, returnSetof, body, language, volatility,
-      strict, securityDefiner, parallel, leakproof, cost, rows, config, comment,
-    ] = line.split("|");
-    return {
-      schema,
-      name,
-      type,
-      routine_oid: Number(oid),
-      param_ord: ord ? Number(ord) : null,
-      param_name: paramName || null,
-      param_type: paramType || null,
-      return_type: returnType || null,
-      return_setof: returnSetof === "t",
-      body: body || null,
-      language,
-      volatility,
-      strict: strict === "t",
-      security_definer: securityDefiner === "t",
-      parallel,
-      leakproof: leakproof === "t",
-      cost: Number(cost),
-      rows: Number(rows),
-      config: parsePgArray(config),
-      comment: comment || null,
-    };
-  });
+  const rows: CatalogRow[] = result.rows.map((r) => ({
+    schema: r.schema,
+    name: r.name,
+    type: r.type,
+    routine_oid: Number(r.routine_oid),
+    param_ord: r.param_ord ? Number(r.param_ord) : null,
+    param_name: r.param_name || null,
+    param_type: r.param_type || null,
+    return_type: r.return_type || null,
+    return_setof: r.return_setof === "t",
+    body: r.body || null,
+    language: r.language,
+    volatility: r.volatility,
+    strict: r.strict === "t",
+    security_definer: r.security_definer === "t",
+    parallel: r.parallel,
+    leakproof: r.leakproof === "t",
+    cost: Number(r.cost),
+    rows: Number(r.rows),
+    config: parsePgArray(r.config),
+    comment: r.comment || null,
+    acl: r.acl ? parsePgArray(r.acl) : null,
+  }));
 
   return parseCatalogRows(rows);
 }

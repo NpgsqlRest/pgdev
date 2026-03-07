@@ -69,6 +69,26 @@ describe("parseRoutineGroups", () => {
     expect(allNames).not.toContain("products");
   });
 
+  test("excludes ACL lines by default (grants=false)", () => {
+    const tocWithAcl = `
+1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
+5800; 0 0 ACL inventory FUNCTION get_product(_product_id integer) shopdb
+`;
+    const result = parseRoutineGroups(tocWithAcl);
+    expect(result[0].tocLines.length).toBe(1);
+    expect(result[0].tocLines[0]).toContain("FUNCTION");
+  });
+
+  test("includes ACL lines when grants=true", () => {
+    const tocWithAcl = `
+1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
+5800; 0 0 ACL inventory FUNCTION get_product(_product_id integer) shopdb
+`;
+    const result = parseRoutineGroups(tocWithAcl, true);
+    expect(result[0].tocLines.length).toBe(2);
+    expect(result[0].tocLines[1]).toContain("ACL");
+  });
+
   test("returns empty array for TOC with no routines", () => {
     const empty = parseRoutineGroups(`;
 ; Archive header

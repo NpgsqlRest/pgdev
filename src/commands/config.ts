@@ -1,7 +1,7 @@
 import { $ } from "bun";
 import { statSync, readdirSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { loadConfig, type PgdevConfig, updateConfig, updateConfigArraySync, removeConfigKey, isSharedConnection } from "../config.ts";
+import { loadConfig, type PgdevConfig, updateConfig, updateConfigBool, updateConfigArraySync, removeConfigKey, isSharedConnection } from "../config.ts";
 import { success, error, pc, formatCmd, spinner } from "../utils/terminal.ts";
 import { ask, askConfirm, askValue, askPath, askDashboard, askMultiSelect } from "../utils/prompt.ts";
 import { readJsonConfig, writeJsonConfig } from "../utils/json.ts";
@@ -2145,6 +2145,7 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
 
     if (choice.type === "item") {
       lastSelected = choice.key;
+
       const key = choice.key as "routines_dir" | "migrations_dir" | "tests_dir";
       const labels: Record<string, string> = {
         routines_dir: "Routines directory",
@@ -2187,6 +2188,11 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             value: environmentStatus(currentConfig),
             help: "Env file and database connection for pgdev tools.",
           },
+        ],
+      },
+      {
+        title: "Project Settings",
+        items: [
           {
             key: "project",
             label: "Project directories",
@@ -2198,6 +2204,18 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             label: "Project schemas",
             value: schemasStatus(currentConfig.project.schemas),
             help: "Select database schemas used by this project.\nEmpty means all non-system schemas.",
+          },
+          {
+            key: "grants",
+            label: "Track grants",
+            value: currentConfig.project.grants ? "yes" : "no",
+            help: "Track GRANT/REVOKE statements for routines.\nWhen enabled, pgdev parses and compares routine permissions,\nand sync includes ACL entries in dumped SQL files.",
+          },
+          {
+            key: "ignore_body_whitespace",
+            label: "Ignore body whitespace",
+            value: currentConfig.project.ignore_body_whitespace ? "yes" : "no",
+            help: "Ignore whitespace differences in routine bodies when comparing.\nWhen enabled, formatting-only changes (indentation, line breaks) are not reported as differences.",
           },
         ],
       },
@@ -2222,6 +2240,14 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
         await editProjectDirectories(currentConfig);
       } else if (choice.key === "schemas") {
         lastStatus = await handleSchemas(currentConfig);
+      } else if (choice.key === "grants") {
+        const newValue = !currentConfig.project.grants;
+        await updateConfigBool("project", "grants", newValue);
+        lastStatus = `grants = ${newValue}`;
+      } else if (choice.key === "ignore_body_whitespace") {
+        const newValue = !currentConfig.project.ignore_body_whitespace;
+        await updateConfigBool("project", "ignore_body_whitespace", newValue);
+        lastStatus = `ignore_body_whitespace = ${newValue}`;
       }
 
       currentConfig = await loadConfig();

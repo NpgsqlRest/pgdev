@@ -23,7 +23,7 @@ interface RoutineGroup {
   tocLines: string[];
 }
 
-export function parseRoutineGroups(tocOutput: string): RoutineGroup[] {
+export function parseRoutineGroups(tocOutput: string, includeGrants = false): RoutineGroup[] {
   const groups = new Map<string, string[]>();
   const groupOrder: string[] = [];
 
@@ -51,10 +51,12 @@ export function parseRoutineGroups(tocOutput: string): RoutineGroup[] {
     }
 
     // ACL on routine: "5800; 0 0 ACL mathmodule FUNCTION auth_login(...) legendea"
-    const aclMatch = line.match(/^\d+;\s+0\s+0\s+ACL\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
-    if (aclMatch) {
-      const name = aclMatch[1];
-      groups.get(name)?.push(line);
+    if (includeGrants) {
+      const aclMatch = line.match(/^\d+;\s+0\s+0\s+ACL\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
+      if (aclMatch) {
+        const name = aclMatch[1];
+        groups.get(name)?.push(line);
+      }
     }
   }
 
@@ -175,7 +177,7 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       const fullRoutinesDir = resolve(process.cwd(), routinesDir);
       mkdirSync(fullRoutinesDir, { recursive: true });
 
-      const routineGroups = parseRoutineGroups(listStdout);
+      const routineGroups = parseRoutineGroups(listStdout, config.project.grants);
 
       if (routineGroups.length > 0) {
         const routineTocFile = resolve(tmpdir(), `pgdev-routine-toc-${Date.now()}.list`);

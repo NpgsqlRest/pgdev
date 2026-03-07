@@ -9,6 +9,7 @@ import { runCommand } from "./commands/run.ts";
 import { configCommand } from "./commands/config.ts";
 import { execCommand, psqlCommand, runPsqlQuery, resolveConnection } from "./commands/exec.ts";
 import { syncCommand } from "./commands/sync.ts";
+import { diffCommand } from "./commands/diff.ts";
 import { loadConfig, ensureConfigFile, isSharedConnection, type PgdevConfig } from "./config.ts";
 import { readJsonConfig } from "./utils/json.ts";
 import { resolveEnvVars, loadEnvFile } from "./utils/env.ts";
@@ -429,6 +430,7 @@ ${pc.bold("Usage:")}
 ${pc.bold("Commands:")}
   config          Configure tools, NpgsqlRest, environment, and project
   init, setup     Alias for config
+  diff            Compare project routines with database
   exec <sql>      Execute SQL command via psql
   psql            Open interactive psql session
   sync            Dump database schema to migrations directory
@@ -497,6 +499,9 @@ export async function run(): Promise<void> {
     }
     case "psql":
       await psqlCommand(config);
+      break;
+    case "diff":
+      await diffCommand(config);
       break;
     case "sync":
       await syncCommand(config);

@@ -28,6 +28,8 @@ export interface ProjectConfig {
   migrations_dir: string;
   tests_dir: string;
   schemas: string[];
+  grants: boolean;
+  ignore_body_whitespace: boolean;
 }
 
 export interface PgdevConfig {
@@ -66,6 +68,8 @@ const defaults: PgdevConfig = {
     migrations_dir: "",
     tests_dir: "",
     schemas: [],
+    grants: false,
+    ignore_body_whitespace: false,
   },
   verbose: true,
 };
@@ -129,6 +133,52 @@ export async function updateConfig(section: string, key: string, value: string):
       }
     } else {
       // Section doesn't exist — append it
+      const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
+      content += `${suffix}\n${sectionHeader}\n${newLine}\n`;
+    }
+  }
+
+  await Bun.write(path, content);
+}
+
+export async function updateConfigBool(section: string, key: string, value: boolean): Promise<void> {
+  const path = `${process.cwd()}/pgdev.toml`;
+  const file = Bun.file(path);
+  let content = (await file.exists()) ? await file.text() : "";
+
+  const newLine = `${key} = ${value}`;
+  const keyPattern = new RegExp(`^${key}\\s*=.*$`, "m");
+
+  if (!section) {
+    const firstSectionMatch = content.match(/^\[/m);
+    const topLevelEnd = firstSectionMatch?.index ?? content.length;
+    const topLevel = content.slice(0, topLevelEnd);
+
+    if (keyPattern.test(topLevel)) {
+      content = topLevel.replace(keyPattern, newLine) + content.slice(topLevelEnd);
+    } else {
+      const suffix = topLevel.endsWith("\n") || topLevel === "" ? "" : "\n";
+      content = topLevel + suffix + newLine + "\n" + content.slice(topLevelEnd);
+    }
+  } else {
+    const sectionHeader = `[${section}]`;
+    const sectionIndex = content.indexOf(sectionHeader);
+    if (sectionIndex !== -1) {
+      const afterSection = content.slice(sectionIndex + sectionHeader.length);
+      const nextSectionMatch = afterSection.match(/\n\[/);
+      const sectionEnd = nextSectionMatch
+        ? sectionIndex + sectionHeader.length + nextSectionMatch.index!
+        : content.length;
+      const sectionContent = content.slice(sectionIndex, sectionEnd);
+
+      if (keyPattern.test(sectionContent)) {
+        const updated = sectionContent.replace(keyPattern, newLine);
+        content = content.slice(0, sectionIndex) + updated + content.slice(sectionEnd);
+      } else {
+        const insertPos = sectionIndex + sectionHeader.length;
+        content = content.slice(0, insertPos) + `\n${newLine}` + content.slice(insertPos);
+      }
+    } else {
       const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
       content += `${suffix}\n${sectionHeader}\n${newLine}\n`;
     }
@@ -276,6 +326,8 @@ const EXPECTED_KEYS: { section: string; key: string; raw: string }[] = [
   { section: "project", key: "migrations_dir", raw: 'migrations_dir = ""' },
   { section: "project", key: "tests_dir", raw: 'tests_dir = ""' },
   { section: "project", key: "schemas", raw: "schemas = []" },
+  { section: "project", key: "grants", raw: "# Track GRANT/REVOKE statements for routines\ngrants = false" },
+  { section: "project", key: "ignore_body_whitespace", raw: "# Ignore whitespace differences in routine bodies when comparing\nignore_body_whitespace = false" },
 ];
 
 const SECTION_COMMENTS: Record<string, string> = {
@@ -406,6 +458,10 @@ migrations_dir = ""
 tests_dir = ""
 # Schemas used by this project (empty = all non-system schemas)
 schemas = []
+# Track GRANT/REVOKE statements for routines
+grants = false
+# Ignore whitespace differences in routine bodies when comparing
+ignore_body_whitespace = false
 `;
 
   await Bun.write(path, content);

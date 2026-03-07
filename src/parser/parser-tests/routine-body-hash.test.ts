@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { normalizeBody, bodyHash } from "../catalog.ts";
+import { normalizeBody, normalizeBodyNoWhitespace, bodyHash } from "../catalog.ts";
 
 describe("normalizeBody", () => {
   test("lowercases content", () => {
@@ -47,5 +47,38 @@ describe("bodyHash", () => {
   test("returns 64-char hex string (SHA-256)", () => {
     const hash = bodyHash("select 1");
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("ignoreWhitespace: spaces around punctuation don't matter", () => {
+    const a = "select fn(type, success)";
+    const b = "select fn( type,success )";
+    expect(bodyHash(a)).not.toBe(bodyHash(b)); // strict mode: different
+    expect(bodyHash(a, true)).toBe(bodyHash(b, true)); // ignore mode: same
+  });
+
+  test("ignoreWhitespace: line break inside expression doesn't matter", () => {
+    const a = "select fn(type, success)";
+    const b = "select fn(type,\nsuccess)";
+    expect(bodyHash(a, true)).toBe(bodyHash(b, true));
+  });
+
+  test("ignoreWhitespace: actual code change still detected", () => {
+    const a = "select fn(type, success)";
+    const b = "select fn(type, failure)";
+    expect(bodyHash(a, true)).not.toBe(bodyHash(b, true));
+  });
+});
+
+describe("normalizeBodyNoWhitespace", () => {
+  test("removes all whitespace", () => {
+    expect(normalizeBodyNoWhitespace("select  _a  +  _b")).toBe("select_a+_b");
+  });
+
+  test("lowercases", () => {
+    expect(normalizeBodyNoWhitespace("SELECT 1")).toBe("select1");
+  });
+
+  test("strips non-printable characters", () => {
+    expect(normalizeBodyNoWhitespace("select\x001")).toBe("select1");
   });
 });

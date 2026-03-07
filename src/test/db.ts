@@ -18,15 +18,14 @@ export async function loadTestConfig(): Promise<TestConfig> {
   const envFile = resolve(import.meta.dir, "../../test.env");
   const fileVars = await loadEnvFile(envFile);
 
-  const get = (key: string, fallback: string) =>
-    fileVars[key] ?? process.env[key] ?? fallback;
-
+  // Only use test.env for config — never fall through to process.env
+  // to prevent accidentally dropping a real database (e.g. from .env)
   cachedConfig = {
-    host: get("PGHOST", "localhost"),
-    port: get("PGPORT", "5432"),
-    user: get("PGUSER", "postgres"),
-    password: get("PGPASSWORD", "postgres"),
-    database: get("PGDATABASE", "pgdev_test"),
+    host: fileVars.PGHOST ?? "localhost",
+    port: fileVars.PGPORT ?? "5432",
+    user: fileVars.PGUSER ?? "postgres",
+    password: fileVars.PGPASSWORD ?? "postgres",
+    database: fileVars.PGDATABASE ?? "pgdev_test",
   };
   return cachedConfig;
 }
