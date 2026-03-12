@@ -37,10 +37,12 @@ describe("body comparison — formatting differences", () => {
     expect(bodyHash(parsed.body!)).toBe(bodyHash(match!.body!));
   });
 
-  test("normalizeBody collapses whitespace and lowercases", () => {
+  test("normalizeBody lowercases and trims but preserves whitespace structure", () => {
     const a = "  SELECT\n    _a\n    +\n    _b;  ";
-    const b = "select _a + _b;";
+    const b = "select\n    _a\n    +\n    _b;";
     expect(normalizeBody(a)).toBe(normalizeBody(b));
+    // Different whitespace structure is detected
+    expect(normalizeBody(a)).not.toBe(normalizeBody("select _a + _b;"));
   });
 
   test("different bodies produce different hashes", () => {

@@ -7,7 +7,10 @@ const SQL = `
 CREATE FUNCTION test_schema.atomic_add(_a int, _b int) RETURNS int
   IMMUTABLE PARALLEL SAFE
   BEGIN ATOMIC;
-    SELECT _a + _b;
+    select 
+      _a 
+      + 
+      _b;
   END;
 `;
 

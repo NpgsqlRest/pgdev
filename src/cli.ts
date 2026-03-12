@@ -12,7 +12,7 @@ import { syncCommand } from "./commands/sync.ts";
 import { diffCommand } from "./commands/diff.ts";
 import { loadConfig, ensureConfigFile, isSharedConnection, type PgdevConfig } from "./config.ts";
 import { readJsonConfig } from "./utils/json.ts";
-import { resolveEnvVars, loadEnvFile } from "./utils/env.ts";
+import { resolvePlaceholders, loadEnvFile } from "./utils/env.ts";
 
 export function splitCommand(command: string): string[] {
   return command.trim().split(/\s+/);
@@ -358,7 +358,7 @@ async function printStatus(): Promise<void> {
     }
 
     for (const [connName, connStr] of Object.entries(connStrings)) {
-      const { resolved } = resolveEnvVars(connStr, envDict);
+      const { resolved } = resolvePlaceholders(connStr, envDict);
       const parsed: Record<string, string> = {};
       for (const part of resolved.split(";")) {
         const eq = part.indexOf("=");
@@ -433,7 +433,7 @@ ${pc.bold("Commands:")}
   diff            Compare project routines with database
   exec <sql>      Execute SQL command via psql
   psql            Open interactive psql session
-  sync            Dump database schema to migrations directory
+  sync            Sync database routines and schema to project files
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 

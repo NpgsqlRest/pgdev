@@ -1,7 +1,8 @@
 import { resolve } from "node:path";
-import { readdirSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import type { PgdevConfig } from "../config.ts";
 import { pc, spinner } from "../utils/terminal.ts";
+import { findSqlFiles } from "../utils/files.ts";
 import { parseRoutines, type ParsedRoutine } from "../parser/routine.ts";
 import { fetchCatalogMetadata, type CatalogRoutine } from "../parser/catalog.ts";
 import { routinesDiffer, commentsDiffer, grantsDiffer, type DiffOptions } from "../parser/compare.ts";
@@ -32,20 +33,6 @@ function parsedDisplayKey(r: ParsedRoutine, defaultSchema: string): string {
 function catalogDisplayKey(r: CatalogRoutine): string {
   const params = r.parameters.map((p) => p.name ? `${p.name} ${p.type}` : p.type);
   return `${r.schema}.${r.name}(${params.join(", ")})`;
-}
-
-/** Recursively find all .sql files in a directory. */
-function findSqlFiles(dir: string): string[] {
-  const results: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = resolve(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...findSqlFiles(full));
-    } else if (entry.isFile() && entry.name.endsWith(".sql")) {
-      results.push(full);
-    }
-  }
-  return results.sort();
 }
 
 export async function diffCommand(config: PgdevConfig): Promise<void> {
@@ -192,7 +179,7 @@ export async function diffCommand(config: PgdevConfig): Promise<void> {
   if (needUpdating.length > 0) {
     console.log(pc.bold(`Different from database (${needUpdating.length}):`));
     for (const { display, file, changes } of needUpdating) {
-      console.log(`  ${pc.yellow("~")} ${display}  ${pc.dim(file)}`);
+      console.log(`  ${pc.yellow("~")} ${display}  ${pc.dim(file)}  ${pc.yellow(changes.join(", "))}`);
     }
     console.log();
   }

@@ -1,12 +1,12 @@
 import { $ } from "bun";
 import { statSync, readdirSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { loadConfig, type PgdevConfig, updateConfig, updateConfigBool, updateConfigArraySync, removeConfigKey, isSharedConnection } from "../config.ts";
+import { loadConfig, type PgdevConfig, updateConfig, updateConfigBool, updateConfigInt, updateConfigArraySync, removeConfigKey, isSharedConnection } from "../config.ts";
 import { success, error, pc, formatCmd, spinner } from "../utils/terminal.ts";
 import { ask, askConfirm, askValue, askPath, askDashboard, askMultiSelect } from "../utils/prompt.ts";
 import { readJsonConfig, writeJsonConfig } from "../utils/json.ts";
 import { splitCommand } from "../cli.ts";
-import { resolveEnvVars, loadEnvFile, buildPgdevEnvDict } from "../utils/env.ts";
+import { resolvePlaceholders, loadEnvFile, buildPgdevEnvDict } from "../utils/env.ts";
 import { runPsqlQuery } from "./exec.ts";
 import { setupNpgsqlRest, setupPostgresTools } from "./setup.ts";
 import { detectNpgsqlRest, detectPgTools, type PgInstallation } from "../utils/tools.ts";
@@ -768,7 +768,7 @@ interface ConnectionFields {
 }
 
 function resolveConnectionField(value: string, envDict: Record<string, string>, warnings: string[]): string {
-  const { resolved, unresolved } = resolveEnvVars(value, envDict);
+  const { resolved, unresolved } = resolvePlaceholders(value, envDict);
   if (unresolved.length > 0) {
     warnings.push(`Unresolved: ${unresolved.join(", ")}`);
   }
@@ -1676,7 +1676,7 @@ async function testPgdevConnection(config: PgdevConfig): Promise<string> {
         Object.assign(envDict, await loadEnvFile(resolve(process.cwd(), envFile)));
       }
     }
-    const { resolved } = resolveEnvVars(connStr, envDict);
+    const { resolved } = resolvePlaceholders(connStr, envDict);
     const parsed = parseConnectionString(resolved);
 
     const connResult = await testConnectionFields(config, {
@@ -2191,7 +2191,7 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
         ],
       },
       {
-        title: "Project Settings",
+        title: "Project",
         items: [
           {
             key: "project",
@@ -2205,6 +2205,11 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             value: schemasStatus(currentConfig.project.schemas),
             help: "Select database schemas used by this project.\nEmpty means all non-system schemas.",
           },
+        ],
+      },
+      {
+        title: "Diff",
+        items: [
           {
             key: "grants",
             label: "Track grants",
@@ -2216,6 +2221,106 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             label: "Ignore body whitespace",
             value: currentConfig.project.ignore_body_whitespace ? "yes" : "no",
             help: "Ignore whitespace differences in routine bodies when comparing.\nWhen enabled, formatting-only changes (indentation, line breaks) are not reported as differences.",
+          },
+        ],
+      },
+      {
+        title: "Sync",
+        items: [
+          {
+            key: "api_dir",
+            label: "API routines dir",
+            value: currentConfig.project.api_dir || pc.dim("(none)"),
+            help: "Subdirectory within routines_dir for API (HTTP endpoint) routines.\nA routine is an API routine if its comment contains HTTP at the start or start of a line.\nLeave empty to place all routines directly in routines_dir.",
+          },
+          {
+            key: "internal_dir",
+            label: "Internal routines dir",
+            value: currentConfig.project.internal_dir || pc.dim("(none)"),
+            help: "Subdirectory within routines_dir for internal (non-API) routines.\nLeave empty to place all routines directly in routines_dir.",
+          },
+          {
+            key: "group_segment",
+            label: "Group by name segment",
+            value: currentConfig.project.group_segment === 0 ? pc.dim("disabled") : String(currentConfig.project.group_segment),
+            help: "Group routines into subdirectories by snake_case name segment.\n0 = disabled. 1 = use first segment of the name.\nE.g. auth_login → auth/, get_user_data → user/ (with generic prefix skipping).",
+          },
+          {
+            key: "skip_prefixes",
+            label: "Skip prefixes",
+            value: currentConfig.project.skip_prefixes.length === 0 ? pc.dim("defaults") : `${currentConfig.project.skip_prefixes.length} custom`,
+            help: "Prefixes to skip when grouping by name segment.\nEmpty = use built-in defaults (get, set, delete, insert, is, has, etc.).\nCustomize to control which verb prefixes are skipped.\nE.g. get_user_data → user/ instead of get/.",
+          },
+          {
+            key: "group_order",
+            label: "Group order",
+            value: currentConfig.project.group_order,
+            help: "Directory nesting order when both api/internal and group segment dirs are used.\n\"type_first\" = api/auth/auth_login.sql\n\"group_first\" = auth/api/auth_login.sql",
+          },
+        ],
+      },
+      {
+        title: "Format",
+        items: [
+          {
+            key: "fmt_lowercase",
+            label: "Lowercase keywords",
+            value: currentConfig.format.lowercase ? "yes" : "no",
+            help: "Lowercase SQL keywords (CREATE, FUNCTION, RETURNS, etc.) in formatted output.",
+          },
+          {
+            key: "fmt_param_style",
+            label: "Parameter style",
+            value: currentConfig.format.param_style,
+            help: "Parameter layout in routine signatures.\n\"multiline\" puts each parameter on its own indented line.\n\"inline\" keeps all parameters on a single line.",
+          },
+          {
+            key: "fmt_attribute_style",
+            label: "Attribute style",
+            value: currentConfig.format.attribute_style,
+            help: "Placement of attributes (LANGUAGE, SECURITY DEFINER, IMMUTABLE, etc.).\n\"multiline\" puts each on its own line between ) and AS.\n\"inline\" keeps them all on one line.",
+          },
+          {
+            key: "fmt_simplify_defaults",
+            label: "Simplify defaults",
+            value: currentConfig.format.simplify_defaults ? "yes" : "no",
+            help: "Simplify pg_dump default expressions.\nE.g. (NULL::text = NULL::text) → null, '{}'::jsonb → '{}'.",
+          },
+          {
+            key: "fmt_omit_default_direction",
+            label: "Omit IN direction",
+            value: currentConfig.format.omit_default_direction ? "yes" : "no",
+            help: "Omit the IN keyword for parameters since it's the default direction.\nOUT, INOUT, and VARIADIC are always shown.",
+          },
+          {
+            key: "fmt_strip_dump_comments",
+            label: "Strip dump comments",
+            value: currentConfig.format.strip_dump_comments ? "yes" : "no",
+            help: "Remove pg_dump header/footer comments from formatted output.\nE.g. \"-- PostgreSQL database dump\", \"-- Name: ...\", etc.",
+          },
+          {
+            key: "fmt_comment_signature_style",
+            label: "Comment signature",
+            value: currentConfig.format.comment_signature_style,
+            help: "Signature style in COMMENT ON statements.\n\"types_only\" uses just types: name(text, integer).\n\"full\" includes parameter names: name(_a text, _b integer).",
+          },
+          {
+            key: "fmt_indent",
+            label: "Indent",
+            value: currentConfig.format.indent === "    " ? "4 spaces" : currentConfig.format.indent === "  " ? "2 spaces" : currentConfig.format.indent === "\t" ? "tab" : JSON.stringify(currentConfig.format.indent),
+            help: "Indentation string used for multiline parameters and table columns.",
+          },
+          {
+            key: "fmt_drop_before_create",
+            label: "Drop before create",
+            value: currentConfig.format.drop_before_create ? "yes" : "no",
+            help: "Add DROP FUNCTION/PROCEDURE IF EXISTS before the CREATE statement.\nUseful for re-runnable SQL files.",
+          },
+          {
+            key: "fmt_create_or_replace",
+            label: "Create or replace",
+            value: currentConfig.format.create_or_replace ? "yes" : "no",
+            help: "Use CREATE OR REPLACE instead of plain CREATE.\nNote: procedures only support OR REPLACE in PostgreSQL 14+.",
           },
         ],
       },
@@ -2248,6 +2353,116 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
         const newValue = !currentConfig.project.ignore_body_whitespace;
         await updateConfigBool("project", "ignore_body_whitespace", newValue);
         lastStatus = `ignore_body_whitespace = ${newValue}`;
+      } else if (choice.key === "api_dir") {
+        const value = await askValue("API routines dir", currentConfig.project.api_dir);
+        if (value !== null) {
+          await updateConfig("project", "api_dir", value);
+          lastStatus = `api_dir = "${value}"`;
+        }
+      } else if (choice.key === "internal_dir") {
+        const value = await askValue("Internal routines dir", currentConfig.project.internal_dir);
+        if (value !== null) {
+          await updateConfig("project", "internal_dir", value);
+          lastStatus = `internal_dir = "${value}"`;
+        }
+      } else if (choice.key === "group_segment") {
+        const value = await askValue("Group segment (0 = disabled)", String(currentConfig.project.group_segment));
+        if (value !== null) {
+          const num = parseInt(value, 10);
+          if (!isNaN(num) && num >= 0) {
+            await updateConfigInt("project", "group_segment", num);
+            lastStatus = `group_segment = ${num}`;
+          } else {
+            lastStatus = "Invalid value — must be 0 or a positive integer";
+          }
+        }
+      } else if (choice.key === "skip_prefixes") {
+        const current = currentConfig.project.skip_prefixes.length > 0
+          ? currentConfig.project.skip_prefixes.join(", ")
+          : "";
+        const value = await askValue("Skip prefixes (comma-separated, empty = defaults)", current);
+        if (value !== null) {
+          const prefixes = value.trim() === ""
+            ? []
+            : value.split(",").map((s) => s.trim()).filter(Boolean);
+          updateConfigArraySync("project", "skip_prefixes", prefixes);
+          lastStatus = prefixes.length === 0 ? "skip_prefixes = [] (using defaults)" : `skip_prefixes = ${prefixes.length} custom`;
+        }
+      } else if (choice.key === "group_order") {
+        const idx = await ask("Group order", [
+          { label: "type_first", description: "api/auth/ — type dir first, then group" },
+          { label: "group_first", description: "auth/api/ — group dir first, then type" },
+        ]);
+        if (idx >= 0) {
+          const value = idx === 0 ? "type_first" : "group_first";
+          await updateConfig("project", "group_order", value);
+          lastStatus = `group_order = "${value}"`;
+        }
+      } else if (choice.key === "fmt_lowercase") {
+        const newValue = !currentConfig.format.lowercase;
+        await updateConfigBool("format", "lowercase", newValue);
+        lastStatus = `lowercase = ${newValue}`;
+      } else if (choice.key === "fmt_param_style") {
+        const idx = await ask("Parameter style", [
+          { label: "multiline", description: "Each parameter on its own line" },
+          { label: "inline", description: "All parameters on one line" },
+        ]);
+        if (idx >= 0) {
+          const value = idx === 0 ? "multiline" : "inline";
+          await updateConfig("format", "param_style", value);
+          lastStatus = `param_style = "${value}"`;
+        }
+      } else if (choice.key === "fmt_attribute_style") {
+        const idx = await ask("Attribute style", [
+          { label: "multiline", description: "Each attribute on its own line" },
+          { label: "inline", description: "All attributes on one line" },
+        ]);
+        if (idx >= 0) {
+          const value = idx === 0 ? "multiline" : "inline";
+          await updateConfig("format", "attribute_style", value);
+          lastStatus = `attribute_style = "${value}"`;
+        }
+      } else if (choice.key === "fmt_simplify_defaults") {
+        const newValue = !currentConfig.format.simplify_defaults;
+        await updateConfigBool("format", "simplify_defaults", newValue);
+        lastStatus = `simplify_defaults = ${newValue}`;
+      } else if (choice.key === "fmt_omit_default_direction") {
+        const newValue = !currentConfig.format.omit_default_direction;
+        await updateConfigBool("format", "omit_default_direction", newValue);
+        lastStatus = `omit_default_direction = ${newValue}`;
+      } else if (choice.key === "fmt_strip_dump_comments") {
+        const newValue = !currentConfig.format.strip_dump_comments;
+        await updateConfigBool("format", "strip_dump_comments", newValue);
+        lastStatus = `strip_dump_comments = ${newValue}`;
+      } else if (choice.key === "fmt_comment_signature_style") {
+        const idx = await ask("Comment signature style", [
+          { label: "types_only", description: "name(text, integer)" },
+          { label: "full", description: "name(_a text, _b integer)" },
+        ]);
+        if (idx >= 0) {
+          const value = idx === 0 ? "types_only" : "full";
+          await updateConfig("format", "comment_signature_style", value);
+          lastStatus = `comment_signature_style = "${value}"`;
+        }
+      } else if (choice.key === "fmt_drop_before_create") {
+        const newValue = !currentConfig.format.drop_before_create;
+        await updateConfigBool("format", "drop_before_create", newValue);
+        lastStatus = `drop_before_create = ${newValue}`;
+      } else if (choice.key === "fmt_create_or_replace") {
+        const newValue = !currentConfig.format.create_or_replace;
+        await updateConfigBool("format", "create_or_replace", newValue);
+        lastStatus = `create_or_replace = ${newValue}`;
+      } else if (choice.key === "fmt_indent") {
+        const idx = await ask("Indentation", [
+          { label: "4 spaces", description: "    (default)" },
+          { label: "2 spaces", description: "  " },
+          { label: "Tab", description: "\\t" },
+        ]);
+        if (idx >= 0) {
+          const value = idx === 0 ? "    " : idx === 1 ? "  " : "\t";
+          await updateConfig("format", "indent", value);
+          lastStatus = `indent = ${idx === 2 ? "tab" : `${idx === 0 ? 4 : 2} spaces`}`;
+        }
       }
 
       currentConfig = await loadConfig();

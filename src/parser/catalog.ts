@@ -136,12 +136,14 @@ function parsePgArray(raw: string): string[] {
   return raw.replace(/^\{/, "").replace(/\}$/, "").split(",");
 }
 
-/** Normalize body for comparison: lowercase, strip non-printable, collapse whitespace. */
+/** Normalize body for comparison: lowercase, normalize line endings, trim trailing whitespace per line. */
 export function normalizeBody(body: string): string {
   return body
     .toLowerCase()
-    .replace(/[^\x20-\x7e]/g, " ")
-    .replace(/\s+/g, " ")
+    .replace(/\r\n?/g, "\n")          // normalize line endings
+    .replace(/[^\x20-\x7e\n]/g, " ")  // strip non-printable (keep newlines)
+    .replace(/[ \t]+$/gm, "")         // trim trailing whitespace per line
+    .replace(/\n{3,}/g, "\n\n")       // collapse 3+ blank lines to 2
     .trim();
 }
 

@@ -4,6 +4,7 @@ export interface RoutineParameter {
   dir: ParameterDir | null;
   name: string | null;
   type: string;
+  default: string | null;
 }
 
 export interface TableColumn {
@@ -148,20 +149,31 @@ function parseOneParam(raw: string): RoutineParameter {
     dir = modeMatch[1].toLowerCase() as ParameterDir;
     s = s.substring(modeMatch[0].length).trim();
   }
-  s = s.replace(/\s+DEFAULT\s+.*/i, "").replace(/\s*=\s.*/, "").trim();
 
-  if (!s) return { dir, name: null, type: "" };
+  // Extract default value before stripping it
+  let defaultVal: string | null = null;
+  const defaultMatch = s.match(/\s+DEFAULT\s+(.*)/i);
+  const eqMatch = !defaultMatch ? s.match(/\s*=\s+(.*)/) : null;
+  if (defaultMatch) {
+    defaultVal = defaultMatch[1].trim();
+    s = s.substring(0, defaultMatch.index!).trim();
+  } else if (eqMatch) {
+    defaultVal = eqMatch[1].trim();
+    s = s.substring(0, eqMatch.index!).trim();
+  }
+
+  if (!s) return { dir, name: null, type: "", default: defaultVal };
 
   if (MULTI_WORD_TYPE_RE.test(s)) {
-    return { dir, name: null, type: s };
+    return { dir, name: null, type: s, default: defaultVal };
   }
 
   const firstSpace = s.search(/\s/);
   if (firstSpace === -1) {
-    return { dir, name: null, type: s };
+    return { dir, name: null, type: s, default: defaultVal };
   }
 
-  return { dir, name: s.substring(0, firstSpace), type: s.substring(firstSpace + 1).trim() };
+  return { dir, name: s.substring(0, firstSpace), type: s.substring(firstSpace + 1).trim(), default: defaultVal };
 }
 
 function parseParameters(paramStr: string): RoutineParameter[] {

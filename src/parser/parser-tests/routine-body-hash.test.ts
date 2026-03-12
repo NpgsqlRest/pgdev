@@ -6,12 +6,13 @@ describe("normalizeBody", () => {
     expect(normalizeBody("SELECT 1")).toBe("select 1");
   });
 
-  test("collapses whitespace", () => {
-    expect(normalizeBody("select   _a   +   _b")).toBe("select _a + _b");
+  test("preserves internal whitespace structure", () => {
+    // New behavior: spaces are NOT collapsed — whitespace differences are meaningful
+    expect(normalizeBody("select   _a   +   _b")).toBe("select   _a   +   _b");
   });
 
-  test("strips newlines and tabs", () => {
-    expect(normalizeBody("select\n    _a\n    +\n    _b;")).toBe("select _a + _b;");
+  test("preserves newlines but trims trailing spaces per line", () => {
+    expect(normalizeBody("select\n    _a\n    +\n    _b;")).toBe("select\n    _a\n    +\n    _b;");
   });
 
   test("trims leading and trailing whitespace", () => {
@@ -22,9 +23,24 @@ describe("normalizeBody", () => {
     expect(normalizeBody("select\x001")).toBe("select 1");
   });
 
-  test("identical logic with different formatting normalizes the same", () => {
+  test("normalizes CRLF to LF", () => {
+    expect(normalizeBody("select\r\n_a")).toBe("select\n_a");
+  });
+
+  test("collapses 3+ blank lines to 2", () => {
+    expect(normalizeBody("select 1;\n\n\n\nselect 2;")).toBe("select 1;\n\nselect 2;");
+  });
+
+  test("different formatting produces different hash in strict mode", () => {
     const a = "  SELECT\n    _price * _rate;\n";
     const b = "select _price * _rate;";
+    // These have different whitespace structure — strict mode should detect this
+    expect(normalizeBody(a)).not.toBe(normalizeBody(b));
+  });
+
+  test("identical formatting normalizes the same", () => {
+    const a = "select\n  _price * _rate;";
+    const b = "SELECT\n  _price * _rate;";
     expect(normalizeBody(a)).toBe(normalizeBody(b));
   });
 });
@@ -34,10 +50,16 @@ describe("bodyHash", () => {
     expect(bodyHash("select 1")).toBe(bodyHash("select 1"));
   });
 
-  test("different formatting produces same hash", () => {
-    const a = "  SELECT\n    _a + _b;\n";
+  test("same content with case difference produces same hash", () => {
+    const a = "SELECT _a + _b;";
     const b = "select _a + _b;";
     expect(bodyHash(a)).toBe(bodyHash(b));
+  });
+
+  test("different whitespace produces different hash in strict mode", () => {
+    const a = "select _a + _b;";
+    const b = "select  _a  +  _b;";
+    expect(bodyHash(a)).not.toBe(bodyHash(b));
   });
 
   test("different content produces different hash", () => {

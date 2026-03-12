@@ -20,9 +20,9 @@ $$;`;
     expect(r.name).toBe("create_order");
     expect(r.schema).toBe("inventory");
     expect(r.parameters).toHaveLength(3);
-    expect(r.parameters[0]).toEqual({ dir: null, name: "_customer_id", type: "integer" });
-    expect(r.parameters[1]).toEqual({ dir: null, name: "_product_id", type: "integer" });
-    expect(r.parameters[2]).toEqual({ dir: null, name: "_quantity", type: "integer" });
+    expect(r.parameters[0]).toEqual({ dir: null, name: "_customer_id", type: "integer", default: null });
+    expect(r.parameters[1]).toEqual({ dir: null, name: "_product_id", type: "integer", default: null });
+    expect(r.parameters[2]).toEqual({ dir: null, name: "_quantity", type: "integer", default: null });
   });
 
   test("defaults with = instead of DEFAULT", () => {
@@ -40,9 +40,9 @@ end;
 $$;`;
     const [r] = parseRoutines(sql);
     expect(r.parameters).toHaveLength(3);
-    expect(r.parameters[0]).toEqual({ dir: null, name: "_category", type: "text" });
-    expect(r.parameters[1]).toEqual({ dir: null, name: "_min_price", type: "numeric" });
-    expect(r.parameters[2]).toEqual({ dir: null, name: "_limit", type: "integer" });
+    expect(r.parameters[0]).toEqual({ dir: null, name: "_category", type: "text", default: null });
+    expect(r.parameters[1]).toEqual({ dir: null, name: "_min_price", type: "numeric", default: "0" });
+    expect(r.parameters[2]).toEqual({ dir: null, name: "_limit", type: "integer", default: "50" });
   });
 
   test("attributes on separate lines", () => {
@@ -102,7 +102,7 @@ $$;`;
     expect(r.name).toBe("restock");
     expect(r.type).toBe("procedure");
     expect(r.parameters).toHaveLength(3);
-    expect(r.parameters[2]).toEqual({ dir: null, name: "_user_id", type: "text" });
+    expect(r.parameters[2]).toEqual({ dir: null, name: "_user_id", type: "text", default: "null" });
     expect(r.body).toContain("declare");
     expect(r.body).toContain("-- look up current stock level");
     expect(r.body).toContain("raise notice");
@@ -207,7 +207,7 @@ $$
 $$;`;
     const [r] = parseRoutines(sql);
     expect(r.parameters).toHaveLength(2);
-    expect(r.parameters[0]).toEqual({ dir: null, name: "_tags", type: "text[]" });
-    expect(r.parameters[1]).toEqual({ dir: null, name: "_ids", type: "integer[]" });
+    expect(r.parameters[0]).toEqual({ dir: null, name: "_tags", type: "text[]", default: "array[]::text[]" });
+    expect(r.parameters[1]).toEqual({ dir: null, name: "_ids", type: "integer[]", default: "'{}'::integer[]" });
   });
 });

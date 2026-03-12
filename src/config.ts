@@ -30,6 +30,24 @@ export interface ProjectConfig {
   schemas: string[];
   grants: boolean;
   ignore_body_whitespace: boolean;
+  api_dir: string;
+  internal_dir: string;
+  group_segment: number;
+  skip_prefixes: string[];
+  group_order: "type_first" | "group_first";
+}
+
+export interface FormatConfig {
+  lowercase: boolean;
+  param_style: "inline" | "multiline";
+  indent: string;
+  simplify_defaults: boolean;
+  omit_default_direction: boolean;
+  attribute_style: "inline" | "multiline";
+  strip_dump_comments: boolean;
+  comment_signature_style: "types_only" | "full";
+  drop_before_create: boolean;
+  create_or_replace: boolean;
 }
 
 export interface PgdevConfig {
@@ -44,6 +62,7 @@ export interface PgdevConfig {
   commands: CommandsConfig;
   connection: ConnectionConfig;
   project: ProjectConfig;
+  format: FormatConfig;
   verbose: boolean;
 }
 
@@ -70,6 +89,23 @@ const defaults: PgdevConfig = {
     schemas: [],
     grants: false,
     ignore_body_whitespace: false,
+    api_dir: "",
+    internal_dir: "",
+    group_segment: 0,
+    skip_prefixes: [],
+    group_order: "type_first",
+  },
+  format: {
+    lowercase: true,
+    param_style: "multiline",
+    indent: "    ",
+    simplify_defaults: true,
+    omit_default_direction: true,
+    attribute_style: "multiline",
+    strip_dump_comments: true,
+    comment_signature_style: "types_only",
+    drop_before_create: true,
+    create_or_replace: false,
   },
   verbose: true,
 };
@@ -142,6 +178,53 @@ export async function updateConfig(section: string, key: string, value: string):
 }
 
 export async function updateConfigBool(section: string, key: string, value: boolean): Promise<void> {
+  const path = `${process.cwd()}/pgdev.toml`;
+  const file = Bun.file(path);
+  let content = (await file.exists()) ? await file.text() : "";
+
+  const newLine = `${key} = ${value}`;
+  const keyPattern = new RegExp(`^${key}\\s*=.*$`, "m");
+
+  if (!section) {
+    const firstSectionMatch = content.match(/^\[/m);
+    const topLevelEnd = firstSectionMatch?.index ?? content.length;
+    const topLevel = content.slice(0, topLevelEnd);
+
+    if (keyPattern.test(topLevel)) {
+      content = topLevel.replace(keyPattern, newLine) + content.slice(topLevelEnd);
+    } else {
+      const suffix = topLevel.endsWith("\n") || topLevel === "" ? "" : "\n";
+      content = topLevel + suffix + newLine + "\n" + content.slice(topLevelEnd);
+    }
+  } else {
+    const sectionHeader = `[${section}]`;
+    const sectionIndex = content.indexOf(sectionHeader);
+    if (sectionIndex !== -1) {
+      const afterSection = content.slice(sectionIndex + sectionHeader.length);
+      const nextSectionMatch = afterSection.match(/\n\[/);
+      const sectionEnd = nextSectionMatch
+        ? sectionIndex + sectionHeader.length + nextSectionMatch.index!
+        : content.length;
+      const sectionContent = content.slice(sectionIndex, sectionEnd);
+
+      if (keyPattern.test(sectionContent)) {
+        const updated = sectionContent.replace(keyPattern, newLine);
+        content = content.slice(0, sectionIndex) + updated + content.slice(sectionEnd);
+      } else {
+        const insertPos = sectionIndex + sectionHeader.length;
+        content = content.slice(0, insertPos) + `\n${newLine}` + content.slice(insertPos);
+      }
+    } else {
+      const suffix = content.endsWith("\n") || content === "" ? "" : "\n";
+      content += `${suffix}\n${sectionHeader}\n${newLine}\n`;
+    }
+  }
+
+  await Bun.write(path, content);
+}
+
+export async function updateConfigInt(section: string, key: string, value: number): Promise<void> {
+  // Same logic as updateConfigBool — writes `key = value` without quotes
   const path = `${process.cwd()}/pgdev.toml`;
   const file = Bun.file(path);
   let content = (await file.exists()) ? await file.text() : "";
@@ -328,6 +411,22 @@ const EXPECTED_KEYS: { section: string; key: string; raw: string }[] = [
   { section: "project", key: "schemas", raw: "schemas = []" },
   { section: "project", key: "grants", raw: "# Track GRANT/REVOKE statements for routines\ngrants = false" },
   { section: "project", key: "ignore_body_whitespace", raw: "# Ignore whitespace differences in routine bodies when comparing\nignore_body_whitespace = false" },
+  { section: "project", key: "api_dir", raw: "# Subdirectory within routines_dir for API (HTTP endpoint) routines\napi_dir = \"\"" },
+  { section: "project", key: "internal_dir", raw: "# Subdirectory within routines_dir for internal (non-API) routines\ninternal_dir = \"\"" },
+  { section: "project", key: "group_segment", raw: "# Group routines into subdirs by name segment (0 = disabled, 1 = first segment)\ngroup_segment = 0" },
+  { section: "project", key: "skip_prefixes", raw: "# Prefixes to skip when grouping by name segment (empty = use built-in defaults)\n# skip_prefixes = [\"get\", \"set\", \"delete\", \"insert\", \"update\", \"create\", \"remove\", \"find\", \"list\", \"is\", \"has\", \"check\", \"count\", \"compute\", \"run\", \"do\", \"send\"]\nskip_prefixes = []" },
+  { section: "project", key: "group_order", raw: "# Directory nesting order when both api/internal and group dirs are used\n# \"type_first\" = api/auth/, \"group_first\" = auth/api/\ngroup_order = \"type_first\"" },
+  // [format]
+  { section: "format", key: "lowercase", raw: "# Lowercase SQL keywords in formatted output\nlowercase = true" },
+  { section: "format", key: "param_style", raw: '# Parameter layout: "inline" or "multiline"\nparam_style = "multiline"' },
+  { section: "format", key: "indent", raw: '# Indentation string\nindent = "    "' },
+  { section: "format", key: "simplify_defaults", raw: "# Simplify default expressions (e.g. NULL::text → null)\nsimplify_defaults = true" },
+  { section: "format", key: "omit_default_direction", raw: "# Omit IN direction (it's the default)\nomit_default_direction = true" },
+  { section: "format", key: "attribute_style", raw: '# Attribute placement: "inline" or "multiline"\nattribute_style = "multiline"' },
+  { section: "format", key: "strip_dump_comments", raw: "# Remove pg_dump header/footer comments\nstrip_dump_comments = true" },
+  { section: "format", key: "comment_signature_style", raw: '# Comment signature: "types_only" or "full"\ncomment_signature_style = "types_only"' },
+  { section: "format", key: "drop_before_create", raw: "# Add DROP IF EXISTS before CREATE statement\ndrop_before_create = true" },
+  { section: "format", key: "create_or_replace", raw: "# Use CREATE OR REPLACE instead of CREATE\ncreate_or_replace = false" },
 ];
 
 const SECTION_COMMENTS: Record<string, string> = {
@@ -335,6 +434,7 @@ const SECTION_COMMENTS: Record<string, string> = {
   "npgsqlrest.commands": '# NpgsqlRest run commands — value is the config file args passed to npgsqlrest CLI\n# Example: dev = "./config/production.json --optional ./config/development.json"',
   commands: "# SQL commands used by pgdev",
   project: "# Project directories for SQL source files\n# Leave empty to skip; directories are created when first needed",
+  format: "# SQL formatter options for routine files generated by sync",
 };
 
 async function backfillConfig(path: string): Promise<void> {
@@ -462,6 +562,42 @@ schemas = []
 grants = false
 # Ignore whitespace differences in routine bodies when comparing
 ignore_body_whitespace = false
+# Subdirectory within routines_dir for API (HTTP endpoint) routines
+api_dir = ""
+# Subdirectory within routines_dir for internal (non-API) routines
+internal_dir = ""
+# Group routines into subdirs by name segment (0 = disabled, 1 = first segment)
+group_segment = 0
+# Prefixes to skip when grouping by name segment (empty = use built-in defaults)
+# skip_prefixes = ["get", "set", "delete", "insert", "update", "create", "remove", "find", "list", "is", "has", "check", "count", "compute", "run", "do", "send"]
+skip_prefixes = []
+# Directory nesting order when both api/internal and group dirs are used
+# "type_first" = api/auth/, "group_first" = auth/api/
+group_order = "type_first"
+
+# SQL formatter options for routine files generated by sync
+[format]
+
+# Lowercase SQL keywords in formatted output
+lowercase = true
+# Parameter layout: "inline" or "multiline"
+param_style = "multiline"
+# Indentation string
+indent = "    "
+# Simplify default expressions (e.g. NULL::text → null)
+simplify_defaults = true
+# Omit IN direction (it's the default)
+omit_default_direction = true
+# Attribute placement: "inline" or "multiline"
+attribute_style = "multiline"
+# Remove pg_dump header/footer comments
+strip_dump_comments = true
+# Comment signature: "types_only" or "full"
+comment_signature_style = "types_only"
+# Add DROP IF EXISTS before CREATE statement
+drop_before_create = true
+# Use CREATE OR REPLACE instead of CREATE
+create_or_replace = false
 `;
 
   await Bun.write(path, content);
@@ -509,6 +645,11 @@ export async function loadConfig(): Promise<PgdevConfig> {
       ...defaults.project,
       ...(project?.project as Partial<ProjectConfig> | undefined),
       ...(local?.project as Partial<ProjectConfig> | undefined),
+    },
+    format: {
+      ...defaults.format,
+      ...(project?.format as Partial<FormatConfig> | undefined),
+      ...(local?.format as Partial<FormatConfig> | undefined),
     },
   } as PgdevConfig;
 }

@@ -1,17 +1,22 @@
 import { resolve } from "node:path";
 
-export function resolveEnvVars(
+/** Replace `{key}` placeholders in a string using values from a dictionary. */
+export function resolvePlaceholders(
   value: string,
-  envDict: Record<string, string>,
+  dict: Record<string, string>,
 ): { resolved: string; unresolved: string[] } {
+  if (!value.includes("{")) return { resolved: value, unresolved: [] };
   const unresolved: string[] = [];
-  const resolved = value.replace(/\{([^}]+)\}/g, (_match, varName: string) => {
-    if (varName in envDict) return envDict[varName];
-    unresolved.push(varName);
-    return `{${varName}}`;
+  const resolved = value.replace(/\{([^}]+)\}/g, (_match, key: string) => {
+    if (key in dict) return dict[key];
+    unresolved.push(key);
+    return `{${key}}`;
   });
   return { resolved, unresolved };
 }
+
+/** @deprecated Use `resolvePlaceholders` instead. */
+export const resolveEnvVars = resolvePlaceholders;
 
 export async function loadEnvFile(path: string): Promise<Record<string, string>> {
   const file = Bun.file(path);

@@ -5,6 +5,9 @@ import { type PgdevConfig } from "../config.ts";
 import { resolveConnection } from "./exec.ts";
 import { splitCommand } from "../cli.ts";
 import { error, success, pc, formatCmd } from "../utils/terminal.ts";
+import { findSqlFiles } from "../utils/files.ts";
+import { parseRoutines } from "../parser/routine.ts";
+import { isApiRoutine, getGroupDir, formatRoutines, configToFormatOptions, DEFAULT_SKIP_PREFIXES } from "../parser/formatter.ts";
 
 function cleanRestoreOutput(sql: string): string {
   return sql
@@ -165,8 +168,12 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       const cleaned = cleanRestoreOutput(restoreStdout);
 
       const outPath = resolve(fullDir, "schema.sql");
-      await Bun.write(outPath, cleaned);
-      console.log(success(`Schema written to ${pc.bold(outPath)}`));
+      if (existsSync(outPath)) {
+        console.log(pc.dim(`Schema file already exists: ${outPath} (skipped)`));
+      } else {
+        await Bun.write(outPath, cleaned);
+        console.log(success(`Schema written to ${pc.bold(outPath)}`));
+      }
     } finally {
       try { unlinkSync(tocFile); } catch {}
     }
@@ -177,12 +184,25 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       const fullRoutinesDir = resolve(process.cwd(), routinesDir);
       mkdirSync(fullRoutinesDir, { recursive: true });
 
+      // Scan existing files to map routine names to file paths
+      const existingRoutines = new Map<string, { file: string; content: string }>();
+      const existingFiles = findSqlFiles(fullRoutinesDir);
+      for (const file of existingFiles) {
+        const content = await Bun.file(file).text();
+        const parsed = parseRoutines(content);
+        for (const r of parsed) {
+          existingRoutines.set(r.name, { file, content });
+        }
+      }
+
       const routineGroups = parseRoutineGroups(listStdout, config.project.grants);
 
       if (routineGroups.length > 0) {
         const routineTocFile = resolve(tmpdir(), `pgdev-routine-toc-${Date.now()}.list`);
         try {
-          let filesWritten = 0;
+          let created = 0;
+          let updated = 0;
+          let unchanged = 0;
           for (const group of routineGroups) {
             await Bun.write(routineTocFile, group.tocLines.join("\n") + "\n");
 
@@ -204,17 +224,69 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
               continue;
             }
 
-            const routineSql = cleanRestoreOutput(rStdout);
-            const outFile = resolve(fullRoutinesDir, `${group.name}.sql`);
-            await Bun.write(outFile, routineSql);
-            filesWritten++;
+            const cleaned = cleanRestoreOutput(rStdout);
+            const formatOpts = configToFormatOptions(config.format);
+            const parsed = parseRoutines(cleaned, { grants: config.project.grants });
+            const routineSql = parsed.length > 0 ? formatRoutines(parsed, formatOpts) : cleaned;
+            const existing = existingRoutines.get(group.name);
 
-            if (config.verbose) {
-              console.error(pc.dim(`  ${group.name}.sql`));
+            if (existing && existing.content.trimEnd() === routineSql.trimEnd()) {
+              // Content identical — skip
+              unchanged++;
+              if (config.verbose) {
+                console.error(pc.dim(`  ${group.name} (unchanged)`));
+              }
+              continue;
+            }
+
+            // Write to existing file path if routine exists, otherwise new file
+            let outFile: string;
+            if (existing) {
+              outFile = existing.file;
+            } else {
+              // Determine base dir: api_dir or internal_dir if configured
+              const isApi = isApiRoutine(parsed);
+              const typeSubDir = isApi ? config.project.api_dir : config.project.internal_dir;
+
+              // Determine group dir from name segment
+              const skipSet = new Set(config.project.skip_prefixes.length > 0 ? config.project.skip_prefixes : DEFAULT_SKIP_PREFIXES);
+              const groupSubDir = getGroupDir(
+                group.name,
+                config.project.group_segment,
+                skipSet,
+              );
+
+              let targetDir = fullRoutinesDir;
+              if (config.project.group_order === "group_first") {
+                if (groupSubDir) targetDir = resolve(targetDir, groupSubDir);
+                if (typeSubDir) targetDir = resolve(targetDir, typeSubDir);
+              } else {
+                if (typeSubDir) targetDir = resolve(targetDir, typeSubDir);
+                if (groupSubDir) targetDir = resolve(targetDir, groupSubDir);
+              }
+              if (targetDir !== fullRoutinesDir) mkdirSync(targetDir, { recursive: true });
+              outFile = resolve(targetDir, `${group.name}.sql`);
+            }
+            await Bun.write(outFile, routineSql);
+
+            if (existing) {
+              updated++;
+              if (config.verbose) {
+                console.error(pc.yellow(`  ${group.name} (updated)`));
+              }
+            } else {
+              created++;
+              if (config.verbose) {
+                console.error(pc.green(`  ${group.name} (created)`));
+              }
             }
           }
 
-          console.log(success(`Routines written to ${pc.bold(routinesDir + "/")} (${filesWritten} files)`));
+          const parts: string[] = [];
+          if (created > 0) parts.push(pc.green(`${created} created`));
+          if (updated > 0) parts.push(pc.yellow(`${updated} updated`));
+          if (unchanged > 0) parts.push(`${unchanged} unchanged`);
+          console.log(success(`Routines in ${pc.bold(routinesDir + "/")}: ${parts.join(", ")}`));
         } finally {
           try { unlinkSync(routineTocFile); } catch {}
         }

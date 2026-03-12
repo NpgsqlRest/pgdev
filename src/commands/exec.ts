@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { type PgdevConfig, isSharedConnection } from "../config.ts";
 import { error, pc, formatCmd } from "../utils/terminal.ts";
 import { splitCommand } from "../cli.ts";
-import { resolveEnvVars, loadEnvFile, buildPgdevEnvDict } from "../utils/env.ts";
+import { resolvePlaceholders, loadEnvFile, buildPgdevEnvDict } from "../utils/env.ts";
 import { readJsonConfig } from "../utils/json.ts";
 
 export interface ConnectionFields {
@@ -53,7 +53,7 @@ export async function resolveConnection(config: PgdevConfig): Promise<Connection
         Object.assign(envDict, await loadEnvFile(resolve(process.cwd(), envFile)));
       }
     }
-    const { resolved } = resolveEnvVars(connStr, envDict);
+    const { resolved } = resolvePlaceholders(connStr, envDict);
     const parsed = parseConnectionString(resolved);
 
     return {
@@ -71,7 +71,7 @@ export async function resolveConnection(config: PgdevConfig): Promise<Connection
   }
 
   const envDict = await buildPgdevEnvDict(config.env_file);
-  const resolve_ = (v: string) => resolveEnvVars(v, envDict).resolved;
+  const resolve_ = (v: string) => resolvePlaceholders(v, envDict).resolved;
 
   return {
     host: resolve_(conn.host ?? "") || "localhost",
