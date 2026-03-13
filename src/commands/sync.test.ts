@@ -36,6 +36,18 @@ describe("parseRoutineGroups", () => {
     ]);
   });
 
+  test("captures schema from TOC", () => {
+    const product = groups.find((g) => g.name === "get_product")!;
+    expect(product.schema).toBe("inventory");
+  });
+
+  test("captures routineType from TOC", () => {
+    const product = groups.find((g) => g.name === "get_product")!;
+    expect(product.routineType).toBe("function");
+    const restock = groups.find((g) => g.name === "restock_item")!;
+    expect(restock.routineType).toBe("procedure");
+  });
+
   test("includes COMMENT lines with the routine", () => {
     const product = groups.find((g) => g.name === "get_product")!;
     expect(product.tocLines.length).toBe(2);
@@ -69,7 +81,7 @@ describe("parseRoutineGroups", () => {
     expect(allNames).not.toContain("products");
   });
 
-  test("excludes ACL lines by default (grants=false)", () => {
+  test("excludes ACL lines by default", () => {
     const tocWithAcl = `
 1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
 5800; 0 0 ACL inventory FUNCTION get_product(_product_id integer) shopdb
@@ -79,12 +91,12 @@ describe("parseRoutineGroups", () => {
     expect(result[0].tocLines[0]).toContain("FUNCTION");
   });
 
-  test("includes ACL lines when grants=true", () => {
+  test("includes ACL lines when includeGrants=true", () => {
     const tocWithAcl = `
 1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
 5800; 0 0 ACL inventory FUNCTION get_product(_product_id integer) shopdb
 `;
-    const result = parseRoutineGroups(tocWithAcl, true);
+    const result = parseRoutineGroups(tocWithAcl, { includeGrants: true });
     expect(result[0].tocLines.length).toBe(2);
     expect(result[0].tocLines[1]).toContain("ACL");
   });
@@ -97,5 +109,77 @@ describe("parseRoutineGroups", () => {
 540; 1259 586428 TABLE inventory products shopdb
 `);
     expect(empty).toEqual([]);
+  });
+
+  test("filters by custom routineTypes", () => {
+    const functionsOnly = parseRoutineGroups(SAMPLE_TOC, { routineTypes: ["FUNCTION"] });
+    expect(functionsOnly.length).toBe(3);
+    expect(functionsOnly.every((g) => g.routineType === "function")).toBe(true);
+    expect(functionsOnly.map((g) => g.name)).not.toContain("restock_item");
+  });
+
+  test("includes AGGREGATE when in routineTypes", () => {
+    const tocWithAgg = `
+1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
+1500; 1255 586800 AGGREGATE inventory avg_price(numeric) shopdb
+`;
+    const result = parseRoutineGroups(tocWithAgg, { routineTypes: ["FUNCTION", "AGGREGATE"] });
+    expect(result.length).toBe(2);
+    expect(result[1].name).toBe("avg_price");
+    expect(result[1].routineType).toBe("aggregate");
+    expect(result[1].schema).toBe("inventory");
+  });
+
+  test("parses VIEW TOC entries (no parentheses)", () => {
+    const tocWithView = `
+1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
+1300; 1259 586800 VIEW inventory product_summary shopdb
+`;
+    const result = parseRoutineGroups(tocWithView, { routineTypes: ["FUNCTION", "VIEW"] });
+    expect(result.length).toBe(2);
+    expect(result[1].name).toBe("product_summary");
+    expect(result[1].routineType).toBe("view");
+    expect(result[1].schema).toBe("inventory");
+  });
+
+  test("VIEW COMMENT lines are grouped with the view", () => {
+    const toc = `
+1300; 1259 586800 VIEW inventory product_summary shopdb
+5803; 0 0 COMMENT inventory VIEW product_summary shopdb
+`;
+    const result = parseRoutineGroups(toc, { routineTypes: ["VIEW"] });
+    expect(result.length).toBe(1);
+    expect(result[0].name).toBe("product_summary");
+    expect(result[0].tocLines.length).toBe(2);
+    expect(result[0].tocLines[1]).toContain("COMMENT");
+  });
+
+  test("VIEW ACL lines are included with includeGrants", () => {
+    const toc = `
+1300; 1259 586800 VIEW inventory product_summary shopdb
+5804; 0 0 ACL inventory VIEW product_summary shopdb
+`;
+    const result = parseRoutineGroups(toc, { routineTypes: ["VIEW"], includeGrants: true });
+    expect(result[0].tocLines.length).toBe(2);
+    expect(result[0].tocLines[1]).toContain("ACL");
+  });
+
+  test("mixed FUNCTION and VIEW types in same TOC", () => {
+    const toc = `
+1290; 1255 586699 FUNCTION inventory get_product(integer) shopdb
+5801; 0 0 COMMENT inventory FUNCTION get_product(_product_id integer) shopdb
+1300; 1259 586800 VIEW inventory product_summary shopdb
+5803; 0 0 COMMENT inventory VIEW product_summary shopdb
+1495; 1255 586705 PROCEDURE inventory restock_item(integer, integer) shopdb
+`;
+    const result = parseRoutineGroups(toc, { routineTypes: ["FUNCTION", "PROCEDURE", "VIEW"] });
+    expect(result.length).toBe(3);
+    expect(result.map((g) => g.name)).toEqual(["get_product", "product_summary", "restock_item"]);
+    expect(result[0].routineType).toBe("function");
+    expect(result[0].tocLines.length).toBe(2);
+    expect(result[1].routineType).toBe("view");
+    expect(result[1].tocLines.length).toBe(2);
+    expect(result[2].routineType).toBe("procedure");
+    expect(result[2].tocLines.length).toBe(1);
   });
 });

@@ -418,4 +418,54 @@ GRANT EXECUTE ON FUNCTION mathmodule.myfn(int) TO web_user;
     expect(result).toContain("revoke all on function mathmodule.myfn(int) from PUBLIC;");
     expect(result).toContain("grant execute on function mathmodule.myfn(int) to web_user;");
   });
+
+  test("formats quoted identifier names correctly", () => {
+    const sql = `CREATE FUNCTION _."exists"(text) RETURNS boolean
+    LANGUAGE sql
+    AS $$ SELECT true; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const result = formatRoutine(parsed);
+
+    expect(result).toContain('drop function if exists _."exists"(text);');
+    expect(result).toContain('create function _."exists"(');
+  });
+
+  test("formats quoted schema and name", () => {
+    const sql = `CREATE FUNCTION "My Schema"."My Func"() RETURNS void
+    LANGUAGE sql AS $$ SELECT 1; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const result = formatRoutine(parsed);
+
+    expect(result).toContain('drop function if exists "My Schema"."My Func"();');
+    expect(result).toContain('create function "My Schema"."My Func"()');
+  });
+
+  test("formats COMMENT ON with quoted identifier", () => {
+    const sql = `CREATE FUNCTION _."exists"(text) RETURNS boolean
+    LANGUAGE sql AS $$ SELECT true; $$;
+COMMENT ON FUNCTION _."exists"(text) IS 'Check existence';`;
+    const [parsed] = parseRoutines(sql);
+    const result = formatRoutine(parsed);
+
+    expect(result).toContain('comment on function _."exists"(text) is \'Check existence\';');
+  });
+
+  test("formats GRANT/REVOKE with quoted identifier", () => {
+    const sql = `CREATE FUNCTION _."exists"(_a text) RETURNS void LANGUAGE sql AS $$ $$;
+GRANT EXECUTE ON FUNCTION _."exists"(text) TO web_user;`;
+    const [parsed] = parseRoutines(sql, { grants: true });
+    const result = formatRoutine(parsed);
+
+    expect(result).toContain('grant execute on function _."exists"(text) to web_user;');
+  });
+
+  test("does not quote unquoted identifiers", () => {
+    const sql = `CREATE FUNCTION _.normal_func(text) RETURNS boolean
+    LANGUAGE sql AS $$ SELECT true; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const result = formatRoutine(parsed);
+
+    expect(result).toContain("drop function if exists _.normal_func(text);");
+    expect(result).toContain("create function _.normal_func(");
+  });
 });

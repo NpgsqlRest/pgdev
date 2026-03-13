@@ -1,4 +1,5 @@
 import type { ParsedRoutine } from "./routine.ts";
+import { quoteIdent } from "./routine.ts";
 import type { FormatConfig } from "../config.ts";
 
 export interface FormatOptions {
@@ -72,6 +73,16 @@ function kw(word: string, lowercase: boolean): string {
   return lowercase ? word.toLowerCase() : word.toUpperCase();
 }
 
+/** Build schema-qualified name, quoting identifiers that were quoted in the source. */
+function qualifiedName(r: ParsedRoutine): string {
+  const name = quoteIdent(r.name, r.nameQuoted ?? false);
+  if (r.schema) {
+    const schema = quoteIdent(r.schema, r.schemaQuoted ?? false);
+    return `${schema}.${name}`;
+  }
+  return name;
+}
+
 /** Format the CREATE FUNCTION/PROCEDURE header with parameters. */
 function formatHeader(r: ParsedRoutine, opts: FormatOptions): string {
   const orReplace = opts.createOrReplace ? ` ${kw("OR REPLACE", opts.lowercase)}` : "";
@@ -79,7 +90,7 @@ function formatHeader(r: ParsedRoutine, opts: FormatOptions): string {
     ? `${kw("CREATE", opts.lowercase)}${orReplace} ${kw("FUNCTION", opts.lowercase)}`
     : `${kw("CREATE", opts.lowercase)}${orReplace} ${kw("PROCEDURE", opts.lowercase)}`;
 
-  const qualName = r.schema ? `${r.schema}.${r.name}` : r.name;
+  const qualName = qualifiedName(r);
 
   // Format parameters
   const params = r.parameters.map((p) => {
@@ -173,7 +184,7 @@ function formatComment(r: ParsedRoutine, opts: FormatOptions): string | null {
   const typeKw = r.type === "function"
     ? kw("FUNCTION", opts.lowercase)
     : kw("PROCEDURE", opts.lowercase);
-  const qualName = r.schema ? `${r.schema}.${r.name}` : r.name;
+  const qualName = qualifiedName(r);
 
   let sig: string;
   if (opts.commentSignatureStyle === "types_only") {
@@ -206,7 +217,7 @@ function formatGrants(r: ParsedRoutine, opts: FormatOptions): string[] {
   const typeKw = r.type === "function"
     ? kw("FUNCTION", opts.lowercase)
     : kw("PROCEDURE", opts.lowercase);
-  const qualName = r.schema ? `${r.schema}.${r.name}` : r.name;
+  const qualName = qualifiedName(r);
   const sig = r.parameters
     .map((p) => opts.lowercase ? p.type.toLowerCase() : p.type)
     .join(", ");
@@ -232,7 +243,7 @@ export function formatRoutine(r: ParsedRoutine, options?: Partial<FormatOptions>
     const typeKw = r.type === "function"
       ? kw("FUNCTION", opts.lowercase)
       : kw("PROCEDURE", opts.lowercase);
-    const qualName = r.schema ? `${r.schema}.${r.name}` : r.name;
+    const qualName = qualifiedName(r);
     const sig = r.parameters
       .map((p) => opts.lowercase ? p.type.toLowerCase() : p.type.toUpperCase())
       .join(", ");

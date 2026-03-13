@@ -34,6 +34,30 @@ export interface ParsedRoutine {
   body: string | null;
   comment: string | null;
   grants: RoutineGrant[];
+  /** True if the name was double-quoted in the source SQL. */
+  nameQuoted?: boolean;
+  /** True if the schema was double-quoted in the source SQL. */
+  schemaQuoted?: boolean;
+}
+
+/**
+ * Strip double quotes from a SQL identifier, unescaping "" → ".
+ * Returns the bare identifier and whether it was quoted.
+ */
+export function unquoteIdent(ident: string): { bare: string; quoted: boolean } {
+  if (ident.startsWith('"') && ident.endsWith('"')) {
+    return { bare: ident.slice(1, -1).replace(/""/g, '"'), quoted: true };
+  }
+  return { bare: ident, quoted: false };
+}
+
+/**
+ * Quote a SQL identifier if needed (was originally quoted).
+ * Escapes internal double quotes as "".
+ */
+export function quoteIdent(name: string, needsQuoting: boolean): string {
+  if (!needsQuoting) return name;
+  return `"${name.replace(/"/g, '""')}"`;
 }
 
 /**
@@ -369,15 +393,23 @@ function extractAttributes(cleaned: string, closeParen: number): string[] {
   return attrs;
 }
 
-const CREATE_ROUTINE_RE =
-  /\bCREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+(?:([a-zA-Z_]\w*)\.)?([a-zA-Z_]\w*)\s*\(/gi;
+/** Pattern for a SQL identifier: unquoted or double-quoted. */
+const IDENT = `(?:"(?:[^"]|"")*"|[a-zA-Z_]\\w*)`;
+
+const CREATE_ROUTINE_RE = new RegExp(
+  `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?(FUNCTION|PROCEDURE)\\s+(?:(${IDENT})\\.)?(${IDENT})\\s*\\(`,
+  "gi",
+);
 
 /**
  * Match COMMENT ON FUNCTION/PROCEDURE [schema.]name(...) IS 'text';
  * Captures: type, schema (optional), name, param signature, comment string.
  */
-const COMMENT_ON_RE =
-  /\bCOMMENT\s+ON\s+(FUNCTION|PROCEDURE)\s+(?:([a-zA-Z_]\w*)\.)?([a-zA-Z_]\w*)\s*\(([^)]*)\)\s+IS\s+'((?:[^']|'')*)'\s*;/gi;
+const COMMENT_ON_RE = new RegExp(
+  `\\bCOMMENT\\s+ON\\s+(FUNCTION|PROCEDURE)\\s+(?:(${IDENT})\\.)?` +
+  `(${IDENT})\\s*\\(([^)]*)\\)\\s+IS\\s+'((?:[^']|'')*)'\\s*;`,
+  "gi",
+);
 
 /**
  * Extract COMMENT ON statements and build a lookup map.
@@ -389,8 +421,8 @@ function parseComments(commentStripped: string): Map<string, string> {
   const re = new RegExp(COMMENT_ON_RE.source, COMMENT_ON_RE.flags);
   while ((m = re.exec(commentStripped)) !== null) {
     const type = m[1].toLowerCase();
-    const schema = m[2] ?? "";
-    const name = m[3];
+    const schema = m[2] ? unquoteIdent(m[2]).bare : "";
+    const name = unquoteIdent(m[3]).bare;
     // COMMENT ON signatures may include param names (pg_dump style: "_id integer")
     // or just types ("integer"). Use parseOneParam to extract just the type.
     const params = m[4]
@@ -411,8 +443,12 @@ function parseComments(commentStripped: string): Map<string, string> {
  * GRANT EXECUTE ON FUNCTION [schema.]name(params) TO role;
  * REVOKE ALL ON FUNCTION [schema.]name(params) FROM role;
  */
-const GRANT_REVOKE_RE =
-  /\b(GRANT|REVOKE)\s+(EXECUTE|ALL(?:\s+PRIVILEGES)?)\s+ON\s+(FUNCTION|PROCEDURE)\s+(?:([a-zA-Z_]\w*)\.)?([a-zA-Z_]\w*)\s*\(([^)]*)\)\s+(?:TO|FROM)\s+([^;]+?)\s*;/gi;
+const GRANT_REVOKE_RE = new RegExp(
+  `\\b(GRANT|REVOKE)\\s+(EXECUTE|ALL(?:\\s+PRIVILEGES)?)\\s+ON\\s+(FUNCTION|PROCEDURE)\\s+` +
+  `(?:(${IDENT})\\.)?` +
+  `(${IDENT})\\s*\\(([^)]*)\\)\\s+(?:TO|FROM)\\s+([^;]+?)\\s*;`,
+  "gi",
+);
 
 function parseGrants(commentStripped: string): Map<string, RoutineGrant[]> {
   const map = new Map<string, RoutineGrant[]>();
@@ -422,8 +458,8 @@ function parseGrants(commentStripped: string): Map<string, RoutineGrant[]> {
     const isGrant = m[1].toUpperCase() === "GRANT";
     const privilege = m[2].toUpperCase().startsWith("ALL") ? "ALL" : "EXECUTE";
     const type = m[3].toLowerCase();
-    const schema = m[4] ?? "";
-    const name = m[5];
+    const schema = m[4] ? unquoteIdent(m[4]).bare : "";
+    const name = unquoteIdent(m[5]).bare;
     const params = m[6]
       .split(",")
       .map((p) => p.trim())
@@ -469,16 +505,21 @@ export function parseRoutines(content: string, options?: { grants?: boolean }): 
     // Extract body from comment-stripped (not dollar-stripped) text
     const body = extractBody(commentStripped, match.index);
 
+    const schemaIdent = match[2] ? unquoteIdent(match[2]) : null;
+    const nameIdent = unquoteIdent(match[3]);
+
     const routine: ParsedRoutine = {
       type: match[1].toLowerCase() as "function" | "procedure",
-      schema: match[2] ?? null,
-      name: match[3],
+      schema: schemaIdent?.bare ?? null,
+      name: nameIdent.bare,
       parameters: parseParameters(paramStr),
       returns,
       attributes,
       body,
       comment: null,
       grants: [],
+      nameQuoted: nameIdent.quoted || undefined,
+      schemaQuoted: schemaIdent?.quoted || undefined,
     };
 
     const key = commentKey(routine);

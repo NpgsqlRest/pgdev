@@ -6,7 +6,7 @@ import { resolveConnection } from "./exec.ts";
 import { splitCommand } from "../cli.ts";
 import { error, success, pc, formatCmd } from "../utils/terminal.ts";
 import { findSqlFiles } from "../utils/files.ts";
-import { parseRoutines } from "../parser/routine.ts";
+import { parseRoutines, unquoteIdent } from "../parser/routine.ts";
 import { isApiRoutine, getGroupDir, formatRoutines, configToFormatOptions, DEFAULT_SKIP_PREFIXES } from "../parser/formatter.ts";
 
 function cleanRestoreOutput(sql: string): string {
@@ -16,54 +16,76 @@ function cleanRestoreOutput(sql: string): string {
       !/^\\(un)?restrict\b/.test(line) &&
       !/^SET\s+\w+/.test(line) &&
       !/^SELECT\s+pg_catalog\.set_config\b/.test(line) &&
-      !/^ALTER\s+(FUNCTION|PROCEDURE)\s+.+\s+OWNER\s+TO\b/.test(line),
+      !/^ALTER\s+(FUNCTION|PROCEDURE|VIEW|AGGREGATE)\s+.+\s+OWNER\s+TO\b/.test(line),
     )
     .join("\n");
 }
 
-interface RoutineGroup {
+export interface RoutineGroup {
   name: string;
+  schema: string;
+  routineType: string;
   tocLines: string[];
 }
 
-export function parseRoutineGroups(tocOutput: string, includeGrants = false): RoutineGroup[] {
-  const groups = new Map<string, string[]>();
+/** Supported routine_types values. */
+export const SUPPORTED_ROUTINE_TYPES = ["FUNCTION", "PROCEDURE", "AGGREGATE", "VIEW"];
+
+export function parseRoutineGroups(
+  tocOutput: string,
+  options: { includeGrants?: boolean; routineTypes?: string[] } = {},
+): RoutineGroup[] {
+  const { includeGrants = false, routineTypes = ["FUNCTION", "PROCEDURE"] } = options;
+  const typePattern = routineTypes.join("|");
+
+  // Definition: "1290; 1255 586699 FUNCTION schema name(...) owner"
+  // or for VIEW: "1290; 1259 586699 VIEW schema view_name owner"
+  // (\S+?) with lazy match stops at ( or whitespace — works for both.
+  const routineRe = new RegExp(
+    `^\\d+;\\s+\\d+\\s+\\d+\\s+(${typePattern})\\s+(\\S+)\\s+(\\S+?)(?:\\(|\\s)`,
+  );
+  // COMMENT: "5801; 0 0 COMMENT schema FUNCTION name(...) owner"
+  // or: "5801; 0 0 COMMENT schema VIEW view_name owner"
+  const commentRe = new RegExp(
+    `^\\d+;\\s+0\\s+0\\s+COMMENT\\s+\\S+\\s+(?:${typePattern})\\s+(\\S+?)(?:\\(|\\s)`,
+  );
+  // ACL: "5800; 0 0 ACL schema FUNCTION name(...) owner"
+  const aclRe = new RegExp(
+    `^\\d+;\\s+0\\s+0\\s+ACL\\s+\\S+\\s+(?:${typePattern})\\s+(\\S+?)(?:\\(|\\s)`,
+  );
+
+  const groups = new Map<string, RoutineGroup>();
   const groupOrder: string[] = [];
 
   for (const line of tocOutput.split("\n")) {
     if (line.startsWith(";") || !line.trim()) continue;
 
-    // Routine definition: "1290; 1255 586699 FUNCTION mathmodule auth_login(...) legendea"
-    const routineMatch = line.match(/^\d+;\s+1255\s+\d+\s+(?:FUNCTION|PROCEDURE)\s+\S+\s+(\S+)\(/);
+    const routineMatch = line.match(routineRe);
     if (routineMatch) {
-      const name = routineMatch[1];
+      const [, routineType, schema, name] = routineMatch;
       if (!groups.has(name)) {
-        groups.set(name, []);
+        groups.set(name, { name, schema, routineType: routineType.toLowerCase(), tocLines: [] });
         groupOrder.push(name);
       }
-      groups.get(name)!.push(line);
+      groups.get(name)!.tocLines.push(line);
       continue;
     }
 
-    // COMMENT on routine: "5801; 0 0 COMMENT mathmodule FUNCTION auth_login(...) legendea"
-    const commentMatch = line.match(/^\d+;\s+0\s+0\s+COMMENT\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
+    const commentMatch = line.match(commentRe);
     if (commentMatch) {
-      const name = commentMatch[1];
-      groups.get(name)?.push(line);
+      groups.get(commentMatch[1])?.tocLines.push(line);
       continue;
     }
 
-    // ACL on routine: "5800; 0 0 ACL mathmodule FUNCTION auth_login(...) legendea"
     if (includeGrants) {
-      const aclMatch = line.match(/^\d+;\s+0\s+0\s+ACL\s+\S+\s+(?:FUNCTION|PROCEDURE)\s+(\S+)\(/);
+      const aclMatch = line.match(aclRe);
       if (aclMatch) {
-        const name = aclMatch[1];
-        groups.get(name)?.push(line);
+        groups.get(aclMatch[1])?.tocLines.push(line);
       }
     }
   }
 
-  return groupOrder.map((name) => ({ name, tocLines: groups.get(name)! }));
+  return groupOrder.map((name) => groups.get(name)!);
 }
 
 export async function syncCommand(config: PgdevConfig): Promise<void> {
@@ -76,6 +98,13 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
   const fullDir = resolve(process.cwd(), migrationsDir);
   if (!existsSync(fullDir)) {
     console.error(error(`migrations_dir does not exist: ${fullDir}`));
+    process.exit(1);
+  }
+
+  // Validate routine_types
+  const unsupported = config.project.routine_types.filter((t) => !SUPPORTED_ROUTINE_TYPES.includes(t));
+  if (unsupported.length > 0) {
+    console.error(error(`Unsupported routine_types: ${unsupported.join(", ")}. Supported: ${SUPPORTED_ROUTINE_TYPES.join(", ")}`));
     process.exit(1);
   }
 
@@ -137,9 +166,13 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       process.exit(listExit);
     }
 
+    // Filter out configured routine types from schema.sql TOC
+    const routineTypeFilterRe = config.project.routine_types.length > 0
+      ? new RegExp(`\\b(?:${config.project.routine_types.join("|")})\\b`)
+      : null;
     const filteredToc = listStdout
       .split("\n")
-      .filter((line) => !/\bFUNCTION\b|\bPROCEDURE\b/.test(line))
+      .filter((line) => !routineTypeFilterRe || !routineTypeFilterRe.test(line))
       .join("\n");
 
     const tocFile = resolve(tmpdir(), `pgdev-toc-${Date.now()}.list`);
@@ -181,6 +214,14 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
     // Step 4: Extract routines to individual files
     const routinesDir = config.project.routines_dir;
     if (routinesDir) {
+      // Warn about group_order dimensions with missing config
+      const groupOrder = config.project.group_order;
+      if (groupOrder.includes("type") && !config.project.api_dir && !config.project.internal_dir) {
+        console.error(pc.yellow(`Warning: group_order includes "type" but api_dir and internal_dir are both empty — "type" dimension will have no effect.`));
+      }
+      if (groupOrder.includes("name") && config.project.group_segment <= 0) {
+        console.error(pc.yellow(`Warning: group_order includes "name" but group_segment is 0 (disabled) — "name" dimension will have no effect.`));
+      }
       const fullRoutinesDir = resolve(process.cwd(), routinesDir);
       mkdirSync(fullRoutinesDir, { recursive: true });
 
@@ -190,12 +231,22 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
       for (const file of existingFiles) {
         const content = await Bun.file(file).text();
         const parsed = parseRoutines(content);
-        for (const r of parsed) {
-          existingRoutines.set(r.name, { file, content });
+        if (parsed.length > 0) {
+          for (const r of parsed) {
+            existingRoutines.set(r.name, { file, content });
+          }
+        } else {
+          // Non-parseable files (e.g. VIEWs) — index by filename stem
+          const stem = file.split("/").pop()!.replace(/\.sql$/i, "");
+          existingRoutines.set(stem, { file, content });
         }
       }
 
-      const routineGroups = parseRoutineGroups(listStdout, config.project.grants);
+      const routineTypes = config.project.routine_types;
+      const routineGroups = parseRoutineGroups(listStdout, {
+        includeGrants: config.project.grants,
+        routineTypes,
+      });
 
       if (routineGroups.length > 0) {
         const routineTocFile = resolve(tmpdir(), `pgdev-routine-toc-${Date.now()}.list`);
@@ -228,13 +279,15 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
             const formatOpts = configToFormatOptions(config.format);
             const parsed = parseRoutines(cleaned, { grants: config.project.grants });
             const routineSql = parsed.length > 0 ? formatRoutines(parsed, formatOpts) : cleaned;
-            const existing = existingRoutines.get(group.name);
+            // Strip quotes from TOC name for lookups/filenames (parser stores bare names)
+            const bareName = unquoteIdent(group.name).bare;
+            const existing = existingRoutines.get(bareName);
 
             if (existing && existing.content.trimEnd() === routineSql.trimEnd()) {
               // Content identical — skip
               unchanged++;
               if (config.verbose) {
-                console.error(pc.dim(`  ${group.name} (unchanged)`));
+                console.error(pc.dim(`  ${bareName} (unchanged)`));
               }
               continue;
             }
@@ -244,40 +297,37 @@ export async function syncCommand(config: PgdevConfig): Promise<void> {
             if (existing) {
               outFile = existing.file;
             } else {
-              // Determine base dir: api_dir or internal_dir if configured
-              const isApi = isApiRoutine(parsed);
-              const typeSubDir = isApi ? config.project.api_dir : config.project.internal_dir;
-
-              // Determine group dir from name segment
-              const skipSet = new Set(config.project.skip_prefixes.length > 0 ? config.project.skip_prefixes : DEFAULT_SKIP_PREFIXES);
-              const groupSubDir = getGroupDir(
-                group.name,
-                config.project.group_segment,
-                skipSet,
-              );
-
+              // Build target directory from group_order dimensions
               let targetDir = fullRoutinesDir;
-              if (config.project.group_order === "group_first") {
-                if (groupSubDir) targetDir = resolve(targetDir, groupSubDir);
-                if (typeSubDir) targetDir = resolve(targetDir, typeSubDir);
-              } else {
-                if (typeSubDir) targetDir = resolve(targetDir, typeSubDir);
-                if (groupSubDir) targetDir = resolve(targetDir, groupSubDir);
+              for (const dim of config.project.group_order) {
+                let subDir = "";
+                if (dim === "type") {
+                  const isApi = isApiRoutine(parsed);
+                  subDir = isApi ? config.project.api_dir : config.project.internal_dir;
+                } else if (dim === "schema") {
+                  subDir = unquoteIdent(group.schema).bare;
+                } else if (dim === "name") {
+                  const skipSet = new Set(config.project.skip_prefixes.length > 0 ? config.project.skip_prefixes : DEFAULT_SKIP_PREFIXES);
+                  subDir = getGroupDir(bareName, config.project.group_segment, skipSet);
+                } else if (dim === "kind") {
+                  subDir = group.routineType;
+                }
+                if (subDir) targetDir = resolve(targetDir, subDir);
               }
               if (targetDir !== fullRoutinesDir) mkdirSync(targetDir, { recursive: true });
-              outFile = resolve(targetDir, `${group.name}.sql`);
+              outFile = resolve(targetDir, `${bareName}.sql`);
             }
             await Bun.write(outFile, routineSql);
 
             if (existing) {
               updated++;
               if (config.verbose) {
-                console.error(pc.yellow(`  ${group.name} (updated)`));
+                console.error(pc.yellow(`  ${bareName} (updated)`));
               }
             } else {
               created++;
               if (config.verbose) {
-                console.error(pc.green(`  ${group.name} (created)`));
+                console.error(pc.green(`  ${bareName} (created)`));
               }
             }
           }

@@ -2252,10 +2252,16 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             help: "Prefixes to skip when grouping by name segment.\nEmpty = use built-in defaults (get, set, delete, insert, is, has, etc.).\nCustomize to control which verb prefixes are skipped.\nE.g. get_user_data → user/ instead of get/.",
           },
           {
+            key: "routine_types",
+            label: "Routine types",
+            value: currentConfig.project.routine_types.length > 0 ? currentConfig.project.routine_types.join(", ") : pc.dim("none"),
+            help: "Object types to extract into individual files (excluded from schema.sql).\nDefault: FUNCTION, PROCEDURE. Add AGGREGATE if needed.",
+          },
+          {
             key: "group_order",
             label: "Group order",
-            value: currentConfig.project.group_order,
-            help: "Directory nesting order when both api/internal and group segment dirs are used.\n\"type_first\" = api/auth/auth_login.sql\n\"group_first\" = auth/api/auth_login.sql",
+            value: currentConfig.project.group_order.length > 0 ? currentConfig.project.group_order.join(", ") : pc.dim("flat"),
+            help: "Directory nesting order. Each element adds a subdirectory level.\nAvailable: type (api/internal), schema, name (name segment), kind (function/procedure).\nExample: type, schema, name → api/myschema/auth/routine.sql\nEmpty = flat (all files in routines_dir).",
           },
         ],
       },
@@ -2388,15 +2394,25 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
           updateConfigArraySync("project", "skip_prefixes", prefixes);
           lastStatus = prefixes.length === 0 ? "skip_prefixes = [] (using defaults)" : `skip_prefixes = ${prefixes.length} custom`;
         }
+      } else if (choice.key === "routine_types") {
+        const current = currentConfig.project.routine_types.join(", ");
+        const value = await askValue("Routine types (comma-separated, e.g. FUNCTION, PROCEDURE)", current);
+        if (value !== null) {
+          const types = value.trim() === ""
+            ? []
+            : value.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+          updateConfigArraySync("project", "routine_types", types);
+          lastStatus = types.length === 0 ? "routine_types = [] (nothing extracted)" : `routine_types = [${types.join(", ")}]`;
+        }
       } else if (choice.key === "group_order") {
-        const idx = await ask("Group order", [
-          { label: "type_first", description: "api/auth/ — type dir first, then group" },
-          { label: "group_first", description: "auth/api/ — group dir first, then type" },
-        ]);
-        if (idx >= 0) {
-          const value = idx === 0 ? "type_first" : "group_first";
-          await updateConfig("project", "group_order", value);
-          lastStatus = `group_order = "${value}"`;
+        const current = currentConfig.project.group_order.join(", ");
+        const value = await askValue("Group order (comma-separated: type, schema, name, kind)", current);
+        if (value !== null) {
+          const dims = value.trim() === ""
+            ? []
+            : value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+          updateConfigArraySync("project", "group_order", dims);
+          lastStatus = dims.length === 0 ? "group_order = [] (flat)" : `group_order = [${dims.join(", ")}]`;
         }
       } else if (choice.key === "fmt_lowercase") {
         const newValue = !currentConfig.format.lowercase;

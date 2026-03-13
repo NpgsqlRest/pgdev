@@ -194,4 +194,84 @@ CREATE FUNCTION catalog.func() RETURNS void LANGUAGE sql AS $$ SELECT 1; $$;`;
     expect(result.length).toBe(1);
     expect(result[0].name).toBe("func");
   });
+
+  test("parses double-quoted function name", () => {
+    const sql = `CREATE FUNCTION _."exists"(text) RETURNS boolean
+    LANGUAGE sql AS $$ SELECT true; $$;`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].name).toBe("exists");
+    expect(result[0].nameQuoted).toBe(true);
+    expect(result[0].schema).toBe("_");
+    expect(result[0].schemaQuoted).toBeUndefined();
+  });
+
+  test("parses double-quoted schema and name", () => {
+    const sql = `CREATE FUNCTION "my schema"."My Func"() RETURNS void
+    LANGUAGE sql AS $$ SELECT 1; $$;`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].schema).toBe("my schema");
+    expect(result[0].schemaQuoted).toBe(true);
+    expect(result[0].name).toBe("My Func");
+    expect(result[0].nameQuoted).toBe(true);
+  });
+
+  test("parses quoted name with escaped double quotes", () => {
+    const sql = `CREATE FUNCTION s."say""hello"() RETURNS void
+    LANGUAGE sql AS $$ SELECT 1; $$;`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].name).toBe('say"hello');
+    expect(result[0].nameQuoted).toBe(true);
+  });
+
+  test("unquoted names have nameQuoted undefined", () => {
+    const sql = `CREATE FUNCTION s.normal_name() RETURNS void
+    LANGUAGE sql AS $$ SELECT 1; $$;`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].name).toBe("normal_name");
+    expect(result[0].nameQuoted).toBeUndefined();
+  });
+
+  test("parses real pg_dump output with quoted identifier (exists)", () => {
+    const sql = `--
+-- PostgreSQL database dump
+--
+
+-- Dumped from database version 18.2
+-- Dumped by pg_dump version 18.1
+
+--
+-- Name: exists(text); Type: FUNCTION; Schema: _; Owner: postgres
+--
+
+CREATE FUNCTION _."exists"(text) RETURNS boolean
+    LANGUAGE sql
+    SET search_path TO 'public', 'pg_catalog'
+    AS \$_\$select _.is_table($1) or _.is_schema($1) or _.is_function($1) or _.is_role($1) or _.is_type($1);\$_\$;
+
+
+--
+-- PostgreSQL database dump complete
+--
+`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].name).toBe("exists");
+    expect(result[0].nameQuoted).toBe(true);
+    expect(result[0].schema).toBe("_");
+    expect(result[0].type).toBe("function");
+  });
+
+  test("matches COMMENT ON with quoted identifiers", () => {
+    const sql = `CREATE FUNCTION _."exists"(text) RETURNS boolean
+    LANGUAGE sql AS $$ SELECT true; $$;
+
+COMMENT ON FUNCTION _."exists"(text) IS 'Check if something exists';`;
+    const result = parseRoutines(sql);
+    expect(result.length).toBe(1);
+    expect(result[0].comment).toBe("Check if something exists");
+  });
 });
