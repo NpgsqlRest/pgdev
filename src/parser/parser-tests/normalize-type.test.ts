@@ -213,4 +213,32 @@ describe("routinesDiffer — type alias normalization", () => {
     const catalog = makeCatalog([{ name: "_a", type: "integer" }], "integer", " SELECT _a + 2; ");
     expect(routinesDiffer(parsed, catalog, { ignoreBodyWhitespace: true })).toBe(true);
   });
+
+  test("SET config with comma-separated quoted values matches catalog", () => {
+    const sql = `CREATE FUNCTION public.test_fn() RETURNS void
+      LANGUAGE sql SET search_path TO 'public', 'pg_catalog'
+      AS $$ SELECT 1; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const expected = attributesToCatalog(parsed);
+    expect(expected.config).toEqual(["search_path=public, pg_catalog"]);
+  });
+
+  test("SET config with single quoted value matches catalog", () => {
+    const sql = `CREATE FUNCTION public.test_fn() RETURNS void
+      LANGUAGE sql SET work_mem TO '64MB'
+      AS $$ SELECT 1; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const expected = attributesToCatalog(parsed);
+    expect(expected.config).toEqual(["work_mem=64MB"]);
+  });
+
+  test("SET config matches catalog for routinesDiffer", () => {
+    const sql = `CREATE FUNCTION public.test_fn() RETURNS void
+      LANGUAGE sql SET search_path TO 'public', 'pg_catalog'
+      AS $$ SELECT 1; $$;`;
+    const [parsed] = parseRoutines(sql);
+    const catalog = makeCatalog([], "void");
+    catalog.config = ["search_path=public, pg_catalog"];
+    expect(routinesDiffer(parsed, catalog)).toBe(false);
+  });
 });

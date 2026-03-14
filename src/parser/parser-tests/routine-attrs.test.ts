@@ -155,6 +155,22 @@ describe("parseRoutines — attributes", () => {
     expect(r.attributes).toContain("SET work_mem TO '64MB'");
   });
 
+  test("extracts SET with comma-separated quoted values", () => {
+    const sql = `CREATE FUNCTION app.my_fn() RETURNS void
+      LANGUAGE sql SET search_path TO 'public', 'pg_catalog'
+      AS $$ SELECT 1; $$;`;
+    const [r] = parseRoutines(sql);
+    expect(r.attributes).toContain("SET search_path TO 'public', 'pg_catalog'");
+  });
+
+  test("extracts SET with comma-separated unquoted values", () => {
+    const sql = `CREATE FUNCTION app.my_fn() RETURNS void
+      LANGUAGE sql SET search_path = public, pg_catalog
+      AS $$ SELECT 1; $$;`;
+    const [r] = parseRoutines(sql);
+    expect(r.attributes).toContain("SET search_path = public, pg_catalog");
+  });
+
   test("extracts SET parameter FROM CURRENT", () => {
     const sql = `CREATE FUNCTION app.inherit() RETURNS void
       LANGUAGE plpgsql SET search_path FROM CURRENT

@@ -120,7 +120,9 @@ export function attributesToCatalog(parsed: ParsedRoutine): ExpectedAttributes {
       // PG also strips surrounding single quotes from values
       const m = a.match(/^SET\s+(\S+)\s*(?:=|TO)\s*(.+)$/i);
       if (!m) return a;
-      const val = m[2].replace(/^'(.*)'$/, "$1");
+      // Strip surrounding single quotes from each comma-separated value
+      // PG stores proconfig as "var=val1, val2" without quotes
+      const val = m[2].replace(/'([^']*)'/g, "$1");
       return `${m[1]}=${val}`;
     });
 

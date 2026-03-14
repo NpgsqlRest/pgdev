@@ -26,12 +26,12 @@ function catalogGroupKey(r: CatalogRoutine): string {
 
 function parsedDisplayKey(r: ParsedRoutine, defaultSchema: string): string {
   const schema = r.schema ?? defaultSchema;
-  const params = r.parameters.map((p) => p.name ? `${p.name} ${p.type.toLowerCase()}` : p.type.toLowerCase());
+  const params = r.parameters.map((p) => p.type.toLowerCase());
   return `${schema}.${r.name}(${params.join(", ")})`;
 }
 
 function catalogDisplayKey(r: CatalogRoutine): string {
-  const params = r.parameters.map((p) => p.name ? `${p.name} ${p.type}` : p.type);
+  const params = r.parameters.map((p) => p.type);
   return `${r.schema}.${r.name}(${params.join(", ")})`;
 }
 

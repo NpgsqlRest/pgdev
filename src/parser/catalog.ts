@@ -130,10 +130,37 @@ export function parseCatalogRows(rows: CatalogRow[]): CatalogRoutine[] {
   return [...map.values()];
 }
 
-/** Parse psql {key=val,...} array format to string[]. */
+/** Parse psql {key=val,...} array format to string[]. Handles quoted elements containing commas. */
 function parsePgArray(raw: string): string[] {
   if (!raw || raw === "{}") return [];
-  return raw.replace(/^\{/, "").replace(/\}$/, "").split(",");
+  const inner = raw.replace(/^\{/, "").replace(/\}$/, "");
+  const result: string[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    if (inner[i] === '"') {
+      // Quoted element — find closing quote (escaped "" → ")
+      let end = i + 1;
+      while (end < inner.length) {
+        if (inner[end] === '"' && inner[end + 1] === '"') { end += 2; continue; }
+        if (inner[end] === '"') break;
+        end++;
+      }
+      result.push(inner.substring(i + 1, end).replace(/""/g, '"'));
+      i = end + 1;
+      // Skip comma separator
+      if (inner[i] === ',') i++;
+    } else {
+      // Unquoted element — find next comma
+      const comma = inner.indexOf(',', i);
+      if (comma === -1) {
+        result.push(inner.substring(i));
+        break;
+      }
+      result.push(inner.substring(i, comma));
+      i = comma + 1;
+    }
+  }
+  return result;
 }
 
 /** Normalize body for comparison: lowercase, normalize line endings, trim trailing whitespace per line. */
