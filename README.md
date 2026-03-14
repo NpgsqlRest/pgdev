@@ -71,6 +71,10 @@ Compare project SQL files against the live database (read-only):
 - Supports `ignore_body_whitespace` for whitespace-insensitive body comparison
 - Supports routines inside `DO $$ ... $$` blocks and files with multiple routines
 
+| Flag | Description |
+|------|-------------|
+| `--script [file]` | Generate a SQL migration script (procedural `DO` block) for all differences. Optionally specify output file path; defaults to a temp file. |
+
 ### `pgdev exec <sql>`
 
 Execute a SQL command via psql using the configured connection.

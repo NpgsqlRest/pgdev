@@ -428,16 +428,16 @@ ${pc.bold("Usage:")}
   ${PACKAGE_NAME} <command> [options]
 
 ${pc.bold("Commands:")}
-  config          Configure tools, NpgsqlRest, environment, and project
-  init, setup     Alias for config
-  diff            Compare project routines with database
-  exec <sql>      Execute SQL command via psql
-  psql            Open interactive psql session
-  sync            Sync database routines and schema to project files
-    --comments          Update only comments in existing source files
-    --grants            Update only grants in existing source files
-    --definitions       Update only definitions in existing source files
-    --all               Apply all selective updates above
+  config          Interactive TUI for tools, NpgsqlRest config, and project setup
+  sync            Extract routines and schema from database into project files
+    --comments          Patch comments into existing files (no overwrite)
+    --grants            Patch grants into existing files (no overwrite)
+    --definitions       Patch definitions into existing files (no overwrite)
+    --all               Patch all of the above into existing files
+  diff            Compare project files against database (read-only)
+    --script [file]     Generate SQL migration script for all differences
+  exec <sql>      Run a SQL statement via psql
+  psql            Open an interactive psql session
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 
@@ -504,9 +504,18 @@ export async function run(): Promise<void> {
     case "psql":
       await psqlCommand(config);
       break;
-    case "diff":
-      await diffCommand(config);
+    case "diff": {
+      const scriptIdx = args.indexOf("--script");
+      const scriptFile = scriptIdx !== -1
+        ? (args[scriptIdx + 1] && !args[scriptIdx + 1].startsWith("--") ? args[scriptIdx + 1] : undefined)
+        : undefined;
+      const diffFlags = {
+        script: scriptIdx !== -1,
+        scriptFile,
+      };
+      await diffCommand(config, diffFlags);
       break;
+    }
     case "sync": {
       const syncFlags = {
         comments: args.includes("--comments") || args.includes("--all"),

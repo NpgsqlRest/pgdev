@@ -74,7 +74,7 @@ function kw(word: string, lowercase: boolean): string {
 }
 
 /** Build schema-qualified name, quoting identifiers that were quoted in the source. */
-function qualifiedName(r: ParsedRoutine): string {
+export function qualifiedName(r: ParsedRoutine): string {
   const name = quoteIdent(r.name, r.nameQuoted ?? false);
   if (r.schema) {
     const schema = quoteIdent(r.schema, r.schemaQuoted ?? false);
@@ -211,7 +211,7 @@ export function formatComment(r: ParsedRoutine, opts: FormatOptions): string | n
 }
 
 /** Format GRANT/REVOKE statements. */
-function formatGrants(r: ParsedRoutine, opts: FormatOptions): string[] {
+export function formatGrants(r: ParsedRoutine, opts: FormatOptions): string[] {
   if (r.grants.length === 0) return [];
 
   const typeKw = r.type === "function"
