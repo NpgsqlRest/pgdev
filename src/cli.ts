@@ -431,6 +431,10 @@ ${pc.bold("Commands:")}
   config          Configure tools, NpgsqlRest, environment, and project
   init, setup     Alias for config
   diff            Compare project routines with database
+    --fix-comments      Update source files with comments from database
+    --fix-grants        Update source files with grants from database
+    --fix-definitions   Update source files with definitions from database
+    --fix-all           Apply all fixes above
   exec <sql>      Execute SQL command via psql
   psql            Open interactive psql session
   sync            Sync database routines and schema to project files
@@ -500,9 +504,15 @@ export async function run(): Promise<void> {
     case "psql":
       await psqlCommand(config);
       break;
-    case "diff":
-      await diffCommand(config);
+    case "diff": {
+      const fixFlags = {
+        comments: args.includes("--fix-comments") || args.includes("--fix-all"),
+        grants: args.includes("--fix-grants") || args.includes("--fix-all"),
+        definitions: args.includes("--fix-definitions") || args.includes("--fix-all"),
+      };
+      await diffCommand(config, fixFlags);
       break;
+    }
     case "sync":
       await syncCommand(config);
       break;

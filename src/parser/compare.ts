@@ -16,7 +16,9 @@ const TYPE_ALIASES: Record<string, string> = {
   bool: "boolean",
   varchar: "character varying",
   char: "character",
+  timestamp: "timestamp without time zone",
   timestamptz: "timestamp with time zone",
+  time: "time without time zone",
   timetz: "time with time zone",
   serial: "integer",
   serial4: "integer",
@@ -29,6 +31,28 @@ const TYPE_ALIASES: Record<string, string> = {
 /** Normalize a SQL type to its canonical form (as returned by format_type). */
 export function normalizeType(type: string): string {
   const lower = type.toLowerCase().trim();
+
+  // Handle array suffix: normalize base type, preserve []
+  if (lower.endsWith("[]")) {
+    const base = lower.slice(0, -2);
+    return normalizeType(base) + "[]";
+  }
+
+  // Handle types with modifiers: char(1), varchar(255), numeric(10,2), etc.
+  const modMatch = lower.match(/^(\w+)\((.+)\)$/);
+  if (modMatch) {
+    const baseName = modMatch[1];
+    const modifier = modMatch[2];
+    const canonicalBase = TYPE_ALIASES[baseName] ?? baseName;
+
+    // char(1) / character(1) → character (1 is the default length)
+    if ((canonicalBase === "character") && modifier.trim() === "1") {
+      return "character";
+    }
+
+    return `${canonicalBase}(${modifier})`;
+  }
+
   return TYPE_ALIASES[lower] ?? lower;
 }
 

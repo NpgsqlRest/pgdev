@@ -41,6 +41,36 @@ Sections:
 - **NpgsqlRest Config Files** — create and manage NpgsqlRest JSON config files (production, development, local) with a TUI editor for connection strings, config settings, and more
 - **pgdev Environment** — configure env file, database connection, and project directories (migrations, routines, tests, schemas)
 
+### `pgdev sync`
+
+Extract database schema and routines into project files:
+
+- Dumps the full schema to `migrations_dir/schema.sql` (DDL for tables, types, etc.)
+- Extracts each routine (function, procedure, or other configured types) into individual `.sql` files in `routines_dir`
+- Applies configurable formatting (see `[format]` options)
+- Organizes files into subdirectories based on `group_order` (by API type, schema, name segment, or object kind)
+- Supports `VIEW` extraction when added to `routine_types`
+- On re-sync, updates existing files in place and reports created/updated/unchanged counts
+
+### `pgdev diff`
+
+Compare project SQL files against the live database:
+
+- Parses all `.sql` files in `routines_dir` and fetches routine metadata from `pg_catalog`
+- Reports routines that need creating, updating, or dropping
+- Compares definition (parameters, return type, body, attributes), comments, and optionally grants
+- Supports `ignore_body_whitespace` for whitespace-insensitive body comparison
+- Supports routines inside `DO $$ ... $$` blocks and files with multiple routines
+
+Fix switches pull data from the database into your source files:
+
+| Flag | Description |
+|------|-------------|
+| `--fix-comments` | Update source files with `COMMENT ON` statements from the database |
+| `--fix-grants` | Update source files with `GRANT`/`REVOKE` statements from the database |
+| `--fix-definitions` | Update source files with routine definitions from the database |
+| `--fix-all` | Apply all fixes above |
+
 ### `pgdev exec <sql>`
 
 Execute a SQL command via psql using the configured connection.
@@ -52,10 +82,6 @@ pgdev exec "SELECT version()"
 ### `pgdev psql`
 
 Open an interactive psql session using the configured connection.
-
-### `pgdev sync`
-
-Dump database schema to the configured migrations directory.
 
 ### `pgdev update`
 
@@ -77,6 +103,7 @@ Then `pgdev dev` will launch NpgsqlRest with those arguments.
 | Option | Description |
 |--------|-------------|
 | `--version`, `-v` | Show versions of pgdev, NpgsqlRest, PostgreSQL tools, and connected server |
+| `--status`, `-s` | Show tools status |
 | `--help`, `-h` | Show help message |
 
 ## Configuration
@@ -130,13 +157,33 @@ password = "{PGPASSWORD}"
 # config_file = "./config/production.json"
 # connection_name = "Default"
 
-# Project directories for SQL source files
-# Leave empty to skip; directories are created when first needed
+# Project directories and settings
 [project]
 routines_dir = ""
 migrations_dir = ""
 tests_dir = ""
 schemas = []
+grants = false
+ignore_body_whitespace = false
+routine_types = ["FUNCTION", "PROCEDURE"]
+api_dir = ""
+internal_dir = ""
+group_segment = 0
+skip_prefixes = []
+group_order = []
+
+# SQL formatting options (applied during sync)
+[format]
+lowercase = true
+param_style = "multiline"
+indent = "    "
+simplify_defaults = true
+omit_default_direction = true
+attribute_style = "multiline"
+strip_dump_comments = true
+comment_signature_style = "types_only"
+drop_before_create = true
+create_or_replace = false
 ```
 
 ### Top-level options
@@ -199,14 +246,48 @@ Database connection for pgdev tools. Two modes:
 
 ### `[project]`
 
-Project directory paths for SQL source files.
+Project directories and sync/diff settings.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `routines_dir` | `""` | Directory for SQL routines (functions/procedures) |
-| `migrations_dir` | `""` | Directory for migration scripts |
+| `routines_dir` | `""` | Directory for extracted SQL routines |
+| `migrations_dir` | `""` | Directory for migration scripts (schema.sql is written here) |
 | `tests_dir` | `""` | Directory for SQL test files |
-| `schemas` | `[]` | Schemas used by this project (empty = all non-system schemas) |
+| `schemas` | `[]` | Schemas to include (empty = all non-system schemas) |
+| `grants` | `false` | Include GRANT/REVOKE statements in sync and diff |
+| `ignore_body_whitespace` | `false` | Ignore whitespace differences in routine bodies during diff |
+| `routine_types` | `["FUNCTION", "PROCEDURE"]` | Object types to extract into individual files. Supported: `FUNCTION`, `PROCEDURE`, `VIEW` |
+| `api_dir` | `""` | Subdirectory for API routines (those with HTTP comments) within the "type" grouping dimension |
+| `internal_dir` | `""` | Subdirectory for non-API routines within the "type" grouping dimension |
+| `group_segment` | `0` | Name segment index for the "name" grouping dimension (0 = disabled). Splits on `_` after skipping common prefixes |
+| `skip_prefixes` | `[]` | Prefixes to skip when extracting group segment (e.g. `["get", "set", "delete"]`). Uses built-in defaults when empty |
+| `group_order` | `[]` | Directory nesting order. Available dimensions: `"type"`, `"schema"`, `"name"`, `"kind"`. Empty = flat directory |
+
+**Directory grouping dimensions:**
+
+- **`type`** — Split by API vs internal (uses `api_dir`/`internal_dir` names). Routines with HTTP comments go to `api_dir`, others to `internal_dir`.
+- **`schema`** — Split by PostgreSQL schema name (uses the schema name as directory).
+- **`name`** — Split by name segment extracted from the routine's snake_case name (e.g. `get_user_data` with `group_segment=1` → `user/`).
+- **`kind`** — Split by object type (uses lowercase type name: `function/`, `procedure/`, `view/`).
+
+Example: `group_order = ["type", "schema", "kind"]` produces paths like `api/myschema/function/my_func.sql`.
+
+### `[format]`
+
+SQL formatting options applied when extracting routines during sync.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `lowercase` | `true` | Lowercase SQL keywords |
+| `param_style` | `"multiline"` | Parameter layout: `"inline"` or `"multiline"` |
+| `indent` | `"    "` | Indentation string for multiline formatting |
+| `simplify_defaults` | `true` | Simplify default expressions (e.g. `NULL::text` → `null`) |
+| `omit_default_direction` | `true` | Omit `IN` direction since it's the default |
+| `attribute_style` | `"multiline"` | Attribute placement: `"inline"` or `"multiline"` |
+| `strip_dump_comments` | `true` | Remove pg_dump header/footer comments |
+| `comment_signature_style` | `"types_only"` | COMMENT ON signature: `"types_only"` or `"full"` (includes param names) |
+| `drop_before_create` | `true` | Add `DROP FUNCTION/PROCEDURE IF EXISTS` before `CREATE` |
+| `create_or_replace` | `false` | Use `CREATE OR REPLACE` instead of `CREATE` |
 
 ## License
 

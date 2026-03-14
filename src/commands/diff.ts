@@ -3,9 +3,16 @@ import { statSync } from "node:fs";
 import type { PgdevConfig } from "../config.ts";
 import { pc, spinner } from "../utils/terminal.ts";
 import { findSqlFiles } from "../utils/files.ts";
-import { parseRoutines, type ParsedRoutine } from "../parser/routine.ts";
+import { parseRoutines, type ParsedRoutine, quoteIdent } from "../parser/routine.ts";
 import { fetchCatalogMetadata, type CatalogRoutine } from "../parser/catalog.ts";
 import { routinesDiffer, commentsDiffer, grantsDiffer, type DiffOptions } from "../parser/compare.ts";
+import { formatComment, configToFormatOptions, type FormatOptions } from "../parser/formatter.ts";
+
+export interface FixFlags {
+  comments: boolean;
+  grants: boolean;
+  definitions: boolean;
+}
 
 /**
  * Match key uses schema.name only. Overloaded functions (same name, different
@@ -35,7 +42,112 @@ function catalogDisplayKey(r: CatalogRoutine): string {
   return `${r.schema}.${r.name}(${params.join(", ")})`;
 }
 
-export async function diffCommand(config: PgdevConfig): Promise<void> {
+/** Build a regex that matches an existing COMMENT ON for a routine. */
+function buildCommentOnRegex(r: ParsedRoutine): RegExp {
+  const typeKw = `(?:FUNCTION|PROCEDURE)`;
+  const schema = r.schema ? `(?:${escapeRegex(quoteIdent(r.schema, r.schemaQuoted ?? false))}|${escapeRegex(r.schema)})\\.` : "";
+  const name = `(?:${escapeRegex(quoteIdent(r.name, r.nameQuoted ?? false))}|${escapeRegex(r.name)})`;
+  return new RegExp(
+    `\\bCOMMENT\\s+ON\\s+${typeKw}\\s+${schema}${name}\\s*\\([^)]*\\)\\s+IS\\s+'(?:[^']|'')*'\\s*;`,
+    "gi",
+  );
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Find the end position of a routine body in the source text.
+ * Searches forward from the CREATE position for the body end ($$; or ';).
+ */
+function findRoutineBodyEnd(content: string, routine: ParsedRoutine): number {
+  // Find the CREATE statement for this routine
+  const schema = routine.schema
+    ? `(?:${escapeRegex(quoteIdent(routine.schema, routine.schemaQuoted ?? false))}|${escapeRegex(routine.schema)})\\.`
+    : "";
+  const name = `(?:${escapeRegex(quoteIdent(routine.name, routine.nameQuoted ?? false))}|${escapeRegex(routine.name)})`;
+  const createRe = new RegExp(
+    `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:FUNCTION|PROCEDURE)\\s+${schema}${name}\\s*\\(`,
+    "gi",
+  );
+  const createMatch = createRe.exec(content);
+  if (!createMatch) return -1;
+
+  // From the CREATE position, find the body end
+  const rest = content.substring(createMatch.index);
+
+  // Try dollar-quoted body: find AS $tag$...$tag$;
+  const dollarRe = /\bAS\s+(\$[a-zA-Z_0-9]*\$)[\s\S]*?\1\s*;/i;
+  const dollarMatch = rest.match(dollarRe);
+
+  // Try single-quoted body: find AS [E]'...';
+  const sqRe = /\bAS\s+(?:E)?'/i;
+  const sqMatch = rest.match(sqRe);
+
+  const dollarPos = dollarMatch?.index ?? Infinity;
+  const sqPos = sqMatch?.index ?? Infinity;
+
+  if (dollarMatch && dollarPos <= sqPos) {
+    return createMatch.index + dollarMatch.index! + dollarMatch[0].length;
+  }
+
+  if (sqMatch && sqPos < dollarPos) {
+    // Find end of single-quoted string
+    let i = sqMatch.index! + sqMatch[0].length;
+    while (i < rest.length) {
+      if (rest[i] === "'" && rest[i + 1] === "'") { i += 2; continue; }
+      if (rest[i] === "'") {
+        // Find the semicolon after the closing quote
+        const afterQuote = rest.substring(i + 1);
+        const semi = afterQuote.match(/^\s*;/);
+        return createMatch.index + i + 1 + (semi ? semi[0].length : 0);
+      }
+      i++;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * Apply comment fixes to a file. Returns the number of routines fixed.
+ */
+function applyCommentFixes(
+  content: string,
+  fixes: { routine: ParsedRoutine; catalogComment: string }[],
+  formatOpts: FormatOptions,
+): { content: string; count: number } {
+  let result = content;
+  let count = 0;
+
+  for (const { routine, catalogComment } of fixes) {
+    // Create a routine copy with the catalog comment for formatting
+    const withComment: ParsedRoutine = { ...routine, comment: catalogComment };
+    const commentSql = formatComment(withComment, formatOpts);
+    if (!commentSql) continue;
+
+    // Try to replace existing COMMENT ON
+    const commentRe = buildCommentOnRegex(routine);
+    if (commentRe.test(result)) {
+      result = result.replace(commentRe, commentSql);
+      count++;
+      continue;
+    }
+
+    // No existing COMMENT ON — insert after routine body end
+    const bodyEnd = findRoutineBodyEnd(result, routine);
+    if (bodyEnd === -1) continue;
+
+    // Insert COMMENT ON after the body end, with a blank line separator
+    result = result.substring(0, bodyEnd) + "\n\n" + commentSql + result.substring(bodyEnd);
+    count++;
+  }
+
+  return { content: result, count };
+}
+
+export async function diffCommand(config: PgdevConfig, fix?: FixFlags): Promise<void> {
   const { routines_dir, schemas, grants, ignore_body_whitespace } = config.project;
 
   if (!routines_dir) {
@@ -113,6 +225,9 @@ export async function diffCommand(config: PgdevConfig): Promise<void> {
   const needDropping: string[] = [];
   const matchedCatalogKeys = new Set<string>();
 
+  // Collect fixable comment diffs grouped by absolute file path
+  const commentFixes = new Map<string, { routine: ParsedRoutine; catalogComment: string }[]>();
+
   for (const [gk, parsedList] of parsedGroups) {
     const catList = catalogGroups.get(gk);
     if (!catList) {
@@ -137,11 +252,20 @@ export async function diffCommand(config: PgdevConfig): Promise<void> {
       const changes: string[] = [];
       const diffOpts: DiffOptions = { ignoreBodyWhitespace: ignore_body_whitespace };
       if (routinesDiffer(p.routine, cat, diffOpts)) changes.push("definition");
-      if (commentsDiffer(p.routine, cat)) changes.push("comment");
+      const hasCommentDiff = commentsDiffer(p.routine, cat);
+      if (hasCommentDiff) changes.push("comment");
       if (grants && grantsDiffer(p.routine, cat)) changes.push("grants");
 
       if (changes.length > 0) {
         needUpdating.push({ display: p.display, file: p.file, changes });
+      }
+
+      // Collect comment fix if needed
+      if (hasCommentDiff && fix?.comments && cat.comment != null) {
+        const absFile = resolve(process.cwd(), p.file);
+        let list = commentFixes.get(absFile);
+        if (!list) { list = []; commentFixes.set(absFile, list); }
+        list.push({ routine: p.routine, catalogComment: cat.comment });
       }
     }
 
@@ -163,6 +287,9 @@ export async function diffCommand(config: PgdevConfig): Promise<void> {
 
   if (needCreating.length === 0 && needUpdating.length === 0 && needDropping.length === 0) {
     console.log(pc.green(`All ${totalParsed} routines match the database.`));
+    if (fix?.comments) console.log(pc.dim("No comment differences to fix."));
+    if (fix?.grants) console.log(pc.dim("No grant differences to fix."));
+    if (fix?.definitions) console.log(pc.dim("No definition differences to fix."));
     return;
   }
 
@@ -199,4 +326,31 @@ export async function diffCommand(config: PgdevConfig): Promise<void> {
   if (needUpdating.length > 0) parts.push(pc.yellow(`${needUpdating.length} to update`));
   if (needDropping.length > 0) parts.push(pc.red(`${needDropping.length} to drop`));
   console.log(parts.join(", "));
+
+  // Apply fixes
+  if (fix?.comments && commentFixes.size > 0) {
+    console.log();
+    const formatOpts = configToFormatOptions(config.format);
+    let totalFixed = 0;
+    for (const [absFile, fixes] of commentFixes) {
+      const content = await Bun.file(absFile).text();
+      const { content: updated, count } = applyCommentFixes(content, fixes, formatOpts);
+      if (count > 0) {
+        await Bun.write(absFile, updated);
+        const relPath = absFile.slice(process.cwd().length + 1);
+        console.log(`  ${pc.green("✓")} ${relPath}  ${pc.dim(`${count} comment${count > 1 ? "s" : ""}`)}`);
+        totalFixed += count;
+      }
+    }
+    if (totalFixed > 0) {
+      console.log(pc.green(`\nFixed ${totalFixed} comment${totalFixed > 1 ? "s" : ""}.`));
+    }
+  }
+
+  if (fix?.definitions) {
+    console.log(pc.yellow("\n--fix-definitions is not yet implemented."));
+  }
+  if (fix?.grants) {
+    console.log(pc.yellow("\n--fix-grants is not yet implemented."));
+  }
 }

@@ -178,7 +178,7 @@ function formatBody(r: ParsedRoutine, opts: FormatOptions): string | null {
 }
 
 /** Format COMMENT ON statement. */
-function formatComment(r: ParsedRoutine, opts: FormatOptions): string | null {
+export function formatComment(r: ParsedRoutine, opts: FormatOptions): string | null {
   if (r.comment == null) return null;
 
   const typeKw = r.type === "function"

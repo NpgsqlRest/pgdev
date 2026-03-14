@@ -117,8 +117,14 @@ function stripComments(sql: string): string {
  * This prevents matching CREATE FUNCTION inside dynamic SQL strings.
  */
 function stripDollarBodies(sql: string): string {
-  const dollarQuoteRe = /(\$[a-zA-Z_0-9]*\$)([\s\S]*?)\1/g;
-  return sql.replace(dollarQuoteRe, "$1$1");
+  // Only strip dollar-quoted bodies preceded by AS (function/procedure bodies).
+  // DO $$ ... $$ blocks are left intact so CREATE statements inside them are visible.
+  const re = /\bAS\s+(\$[a-zA-Z_0-9]*\$)([\s\S]*?)\1/gi;
+  // Replace body content with spaces to preserve string length (position alignment with commentStripped)
+  return sql.replace(re, (match, tag, body) => {
+    const prefix = match.substring(0, match.indexOf(tag));
+    return prefix + tag + " ".repeat(body.length) + tag;
+  });
 }
 
 /**
@@ -214,13 +220,19 @@ function parseParameters(paramStr: string): RoutineParameter[] {
 function extractBody(sql: string, afterParams: number): string | null {
   const rest = sql.substring(afterParams);
 
-  // 1. Dollar-quoted: AS $tag$...$tag$
+  // Find the nearest body marker — dollar-quoted or single-quoted — to avoid
+  // matching a later function's body when the current one uses a different style.
   const dollarMatch = rest.match(/\bAS\s+(\$[a-zA-Z_0-9]*\$)([\s\S]*?)\1/i);
-  if (dollarMatch) return dollarMatch[2];
-
-  // 2. Single-quoted (with E prefix): AS [E]'...'
   const sqStart = rest.match(/\bAS\s+(E)?'/i);
-  if (sqStart) {
+
+  const dollarPos = dollarMatch?.index ?? Infinity;
+  const sqPos = sqStart?.index ?? Infinity;
+
+  // 1. Dollar-quoted: AS $tag$...$tag$ (use only if it appears before single-quoted)
+  if (dollarMatch && dollarPos <= sqPos) return dollarMatch[2];
+
+  // 2. Single-quoted (with E prefix): AS [E]'...' (use only if it appears before dollar-quoted)
+  if (sqStart && sqPos < dollarPos) {
     const offset = sqStart.index! + sqStart[0].length;
     let body = "";
     let i = offset;
@@ -267,11 +279,16 @@ function parseTableColumn(raw: string): TableColumn {
 function extractReturns(cleaned: string, afterCloseParen: number): RoutineReturn | null {
   const rest = cleaned.substring(afterCloseParen);
 
-  const returnsMatch = rest.match(/\bRETURNS\s+/i);
+  // Bound search to the zone between ) and body (AS, BEGIN ATOMIC, or ;)
+  const endMatch = rest.match(/\bAS\s|BEGIN\s+ATOMIC/i);
+  const endIdx = endMatch ? endMatch.index! : rest.indexOf(";");
+  const zone = endIdx >= 0 ? rest.substring(0, endIdx) : rest;
+
+  const returnsMatch = zone.match(/\bRETURNS\s+/i);
   if (!returnsMatch) return null;
 
   const afterReturns = returnsMatch.index! + returnsMatch[0].length;
-  const tail = rest.substring(afterReturns);
+  const tail = zone.substring(afterReturns);
 
   // RETURNS TABLE(...)
   const tableMatch = tail.match(/^TABLE\s*\(/i);
@@ -407,7 +424,7 @@ const CREATE_ROUTINE_RE = new RegExp(
  */
 const COMMENT_ON_RE = new RegExp(
   `\\bCOMMENT\\s+ON\\s+(FUNCTION|PROCEDURE)\\s+(?:(${IDENT})\\.)?` +
-  `(${IDENT})\\s*\\(([^)]*)\\)\\s+IS\\s+'((?:[^']|'')*)'\\s*;`,
+  `(${IDENT})\\s*\\(([^)]*(?:\\([^)]*\\)[^)]*)*)\\)\\s+IS\\s+'((?:[^']|'')*)'\\s*;`,
   "gi",
 );
 
@@ -446,7 +463,7 @@ function parseComments(commentStripped: string): Map<string, string> {
 const GRANT_REVOKE_RE = new RegExp(
   `\\b(GRANT|REVOKE)\\s+(EXECUTE|ALL(?:\\s+PRIVILEGES)?)\\s+ON\\s+(FUNCTION|PROCEDURE)\\s+` +
   `(?:(${IDENT})\\.)?` +
-  `(${IDENT})\\s*\\(([^)]*)\\)\\s+(?:TO|FROM)\\s+([^;]+?)\\s*;`,
+  `(${IDENT})\\s*\\(([^)]*(?:\\([^)]*\\)[^)]*)*)\\)\\s+(?:TO|FROM)\\s+([^;]+?)\\s*;`,
   "gi",
 );
 
