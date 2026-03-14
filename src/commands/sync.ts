@@ -8,6 +8,16 @@ import { error, success, pc, formatCmd } from "../utils/terminal.ts";
 import { findSqlFiles } from "../utils/files.ts";
 import { parseRoutines, unquoteIdent } from "../parser/routine.ts";
 import { isApiRoutine, getGroupDir, formatRoutines, configToFormatOptions, DEFAULT_SKIP_PREFIXES } from "../parser/formatter.ts";
+import { fetchCatalogMetadata, type CatalogRoutine } from "../parser/catalog.ts";
+import { commentsDiffer } from "../parser/compare.ts";
+import { applyCommentFixes } from "../parser/fix.ts";
+import type { ParsedRoutine } from "../parser/routine.ts";
+
+export interface SyncFlags {
+  comments: boolean;
+  grants: boolean;
+  definitions: boolean;
+}
 
 function cleanRestoreOutput(sql: string): string {
   return sql
@@ -88,7 +98,118 @@ export function parseRoutineGroups(
   return groupOrder.map((name) => groups.get(name)!);
 }
 
-export async function syncCommand(config: PgdevConfig): Promise<void> {
+/**
+ * Selective sync: update only comments (or grants) in existing source files
+ * by comparing parsed routines against the database catalog.
+ */
+async function selectiveSync(config: PgdevConfig, flags: SyncFlags): Promise<void> {
+  const { routines_dir, schemas, grants } = config.project;
+
+  if (!routines_dir) {
+    console.error(error("No routines_dir configured. Run pgdev config to set it up."));
+    process.exit(1);
+  }
+
+  if (schemas.length === 0) {
+    console.error(error("No schemas configured. Run pgdev config to set project schemas."));
+    process.exit(1);
+  }
+
+  const fullDir = resolve(process.cwd(), routines_dir);
+  if (!existsSync(fullDir)) {
+    console.error(error(`Routines directory not found: ${routines_dir}`));
+    process.exit(1);
+  }
+
+  const sqlFiles = findSqlFiles(fullDir);
+  if (sqlFiles.length === 0) {
+    console.log(pc.yellow("No .sql files found in " + routines_dir));
+    return;
+  }
+
+  const defaultSchema = schemas[0];
+
+  // Parse all SQL files
+  const fileRoutines = new Map<string, { routine: ParsedRoutine; relPath: string }[]>();
+  for (const file of sqlFiles) {
+    const content = await Bun.file(file).text();
+    const routines = parseRoutines(content, { grants });
+    const relPath = file.slice(process.cwd().length + 1);
+    for (const r of routines) {
+      const key = `${r.schema ?? defaultSchema}.${r.name}`;
+      let list = fileRoutines.get(key);
+      if (!list) { list = []; fileRoutines.set(key, list); }
+      list.push({ routine: r, relPath });
+    }
+  }
+
+  // Fetch catalog
+  let catalog: CatalogRoutine[];
+  try {
+    catalog = await fetchCatalogMetadata(config);
+  } catch (err) {
+    console.error(error(err instanceof Error ? err.message : String(err)));
+    process.exit(1);
+  }
+
+  // Match and collect fixes grouped by absolute file path
+  const commentFixesByFile = new Map<string, { routine: ParsedRoutine; catalogComment: string }[]>();
+
+  for (const cat of catalog) {
+    const key = `${cat.schema}.${cat.name}`;
+    const parsedList = fileRoutines.get(key);
+    if (!parsedList) continue;
+
+    // Match by param count
+    const match = parsedList.find((p) => p.routine.parameters.length === cat.parameters.length);
+    if (!match) continue;
+
+    if (flags.comments && commentsDiffer(match.routine, cat) && cat.comment != null) {
+      const absFile = resolve(process.cwd(), match.relPath);
+      let list = commentFixesByFile.get(absFile);
+      if (!list) { list = []; commentFixesByFile.set(absFile, list); }
+      list.push({ routine: match.routine, catalogComment: cat.comment });
+    }
+  }
+
+  // Apply comment fixes
+  if (flags.comments) {
+    if (commentFixesByFile.size === 0) {
+      console.log(pc.dim("No comment differences to sync."));
+      return;
+    }
+
+    const formatOpts = configToFormatOptions(config.format);
+    let totalFixed = 0;
+    for (const [absFile, fixes] of commentFixesByFile) {
+      const content = await Bun.file(absFile).text();
+      const { content: updated, count } = applyCommentFixes(content, fixes, formatOpts);
+      if (count > 0) {
+        await Bun.write(absFile, updated);
+        const relPath = absFile.slice(process.cwd().length + 1);
+        console.log(`  ${pc.green("✓")} ${relPath}  ${pc.dim(`${count} comment${count > 1 ? "s" : ""}`)}`);
+        totalFixed += count;
+      }
+    }
+    if (totalFixed > 0) {
+      console.log(success(`Synced ${totalFixed} comment${totalFixed > 1 ? "s" : ""}.`));
+    }
+  }
+
+  if (flags.grants) {
+    console.log(pc.yellow("--grants sync is not yet implemented."));
+  }
+  if (flags.definitions) {
+    console.log(pc.yellow("--definitions sync is not yet implemented."));
+  }
+}
+
+export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promise<void> {
+  // Selective sync mode — only update specific aspects of existing files
+  if (flags?.comments || flags?.grants || flags?.definitions) {
+    return selectiveSync(config, flags);
+  }
+
   const migrationsDir = config.project.migrations_dir;
   if (!migrationsDir) {
     console.error(error("No migrations_dir configured. Run pgdev config to set it up."));

@@ -43,7 +43,7 @@ Sections:
 
 ### `pgdev sync`
 
-Extract database schema and routines into project files:
+Extract database schema and routines into project files (DB → Files):
 
 - Dumps the full schema to `migrations_dir/schema.sql` (DDL for tables, types, etc.)
 - Extracts each routine (function, procedure, or other configured types) into individual `.sql` files in `routines_dir`
@@ -52,24 +52,24 @@ Extract database schema and routines into project files:
 - Supports `VIEW` extraction when added to `routine_types`
 - On re-sync, updates existing files in place and reports created/updated/unchanged counts
 
+Selective sync updates only specific aspects of existing source files without overwriting them:
+
+| Flag | Description |
+|------|-------------|
+| `--comments` | Surgically insert or update `COMMENT ON` statements from the database |
+| `--grants` | Update `GRANT`/`REVOKE` statements from the database |
+| `--definitions` | Update routine definitions from the database |
+| `--all` | Apply all selective updates above |
+
 ### `pgdev diff`
 
-Compare project SQL files against the live database:
+Compare project SQL files against the live database (read-only):
 
 - Parses all `.sql` files in `routines_dir` and fetches routine metadata from `pg_catalog`
 - Reports routines that need creating, updating, or dropping
 - Compares definition (parameters, return type, body, attributes), comments, and optionally grants
 - Supports `ignore_body_whitespace` for whitespace-insensitive body comparison
 - Supports routines inside `DO $$ ... $$` blocks and files with multiple routines
-
-Fix switches pull data from the database into your source files:
-
-| Flag | Description |
-|------|-------------|
-| `--fix-comments` | Update source files with `COMMENT ON` statements from the database |
-| `--fix-grants` | Update source files with `GRANT`/`REVOKE` statements from the database |
-| `--fix-definitions` | Update source files with routine definitions from the database |
-| `--fix-all` | Apply all fixes above |
 
 ### `pgdev exec <sql>`
 

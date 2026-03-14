@@ -431,13 +431,13 @@ ${pc.bold("Commands:")}
   config          Configure tools, NpgsqlRest, environment, and project
   init, setup     Alias for config
   diff            Compare project routines with database
-    --fix-comments      Update source files with comments from database
-    --fix-grants        Update source files with grants from database
-    --fix-definitions   Update source files with definitions from database
-    --fix-all           Apply all fixes above
   exec <sql>      Execute SQL command via psql
   psql            Open interactive psql session
   sync            Sync database routines and schema to project files
+    --comments          Update only comments in existing source files
+    --grants            Update only grants in existing source files
+    --definitions       Update only definitions in existing source files
+    --all               Apply all selective updates above
   update          Update ${PACKAGE_NAME} to the latest version
 `;
 
@@ -504,18 +504,18 @@ export async function run(): Promise<void> {
     case "psql":
       await psqlCommand(config);
       break;
-    case "diff": {
-      const fixFlags = {
-        comments: args.includes("--fix-comments") || args.includes("--fix-all"),
-        grants: args.includes("--fix-grants") || args.includes("--fix-all"),
-        definitions: args.includes("--fix-definitions") || args.includes("--fix-all"),
+    case "diff":
+      await diffCommand(config);
+      break;
+    case "sync": {
+      const syncFlags = {
+        comments: args.includes("--comments") || args.includes("--all"),
+        grants: args.includes("--grants") || args.includes("--all"),
+        definitions: args.includes("--definitions") || args.includes("--all"),
       };
-      await diffCommand(config, fixFlags);
+      await syncCommand(config, syncFlags);
       break;
     }
-    case "sync":
-      await syncCommand(config);
-      break;
     case "update":
       await updateCommand(config);
       break;
