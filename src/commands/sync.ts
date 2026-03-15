@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { type PgdevConfig } from "../config.ts";
+import { type PgdevConfig, updateConfigArray } from "../config.ts";
 import { resolveConnection } from "./exec.ts";
 import { splitCommand } from "../cli.ts";
 import { error, success, pc, formatCmd } from "../utils/terminal.ts";
@@ -9,14 +9,37 @@ import { findSqlFiles } from "../utils/files.ts";
 import { parseRoutines, unquoteIdent } from "../parser/routine.ts";
 import { isApiRoutine, getGroupDir, formatRoutines, configToFormatOptions, DEFAULT_SKIP_PREFIXES } from "../parser/formatter.ts";
 import { fetchCatalogMetadata, type CatalogRoutine } from "../parser/catalog.ts";
-import { commentsDiffer } from "../parser/compare.ts";
-import { applyCommentFixes } from "../parser/fix.ts";
+import { commentsDiffer, parsedRoutinesDiffer } from "../parser/compare.ts";
+import { applyCommentFixes, applyBodyFixes, applyGrantFixes, removeComments } from "../parser/fix.ts";
 import type { ParsedRoutine } from "../parser/routine.ts";
+import { bodyHash } from "../parser/catalog.ts";
+
+type SyncAction = "yes" | "no" | "never" | "all" | "all-create" | "all-update" | "quit";
+
+/**
+ * Prompt user for sync action.
+ * Ctrl+C / null input → quit.
+ */
+function askSyncAction(): SyncAction {
+  const input = prompt(`  ${pc.dim("[Y]es / [n]o / [N]ever / [a]ll / [c]reate all / [u]pdate all / [q]uit")}`);
+  if (input === null) return "quit"; // Ctrl+C or Ctrl+D
+  const answer = input.trim().toLowerCase();
+  if (answer === "" || answer === "y" || answer === "yes") return "yes";
+  if (answer === "n" || answer === "no") return "no";
+  if (answer.startsWith("ne") || answer === "never") return "never";
+  if (answer === "a" || answer === "all") return "all";
+  if (answer === "c" || answer === "create all") return "all-create";
+  if (answer === "u" || answer === "update all") return "all-update";
+  if (answer === "q" || answer === "quit") return "quit";
+  return "yes"; // default
+}
 
 export interface SyncFlags {
   comments: boolean;
   grants: boolean;
   definitions: boolean;
+  format: boolean;
+  force: boolean;
 }
 
 function cleanRestoreOutput(sql: string): string {
@@ -207,6 +230,9 @@ async function selectiveSync(config: PgdevConfig, flags: SyncFlags): Promise<voi
 export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promise<void> {
   // Selective sync mode — only update specific aspects of existing files
   if (flags?.comments || flags?.grants || flags?.definitions) {
+    if (flags.format) {
+      console.error(pc.yellow("Warning: --format is ignored when using --comments, --grants, or --definitions."));
+    }
     return selectiveSync(config, flags);
   }
 
@@ -372,9 +398,18 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
       if (routineGroups.length > 0) {
         const routineTocFile = resolve(tmpdir(), `pgdev-routine-toc-${Date.now()}.list`);
         try {
-          let created = 0;
-          let updated = 0;
-          let unchanged = 0;
+          const formatOpts = configToFormatOptions(config.format);
+
+          // Collect original file contents for unchanged comparison
+          const existingFileContents = new Map<string, string>();
+          for (const file of existingFiles) {
+            existingFileContents.set(file, await Bun.file(file).text());
+          }
+
+          // First pass: extract each routine and group by target file
+          const forceFormat = flags?.format ?? false;
+          const fileRoutines = new Map<string, { sqls: string[]; parsed: ParsedRoutine[]; isNew: boolean }>();
+
           for (const group of routineGroups) {
             await Bun.write(routineTocFile, group.tocLines.join("\n") + "\n");
 
@@ -397,26 +432,17 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
             }
 
             const cleaned = cleanRestoreOutput(rStdout);
-            const formatOpts = configToFormatOptions(config.format);
             const parsed = parseRoutines(cleaned, { grants: config.project.grants });
             const routineSql = parsed.length > 0 ? formatRoutines(parsed, formatOpts) : cleaned;
-            // Strip quotes from TOC name for lookups/filenames (parser stores bare names)
             const bareName = unquoteIdent(group.name).bare;
             const existing = existingRoutines.get(bareName);
 
-            if (existing && existing.content.trimEnd() === routineSql.trimEnd()) {
-              // Content identical — skip
-              unchanged++;
-              if (config.verbose) {
-                console.error(pc.dim(`  ${bareName} (unchanged)`));
-              }
-              continue;
-            }
-
-            // Write to existing file path if routine exists, otherwise new file
+            // Determine target file
             let outFile: string;
+            let isNew: boolean;
             if (existing) {
               outFile = existing.file;
+              isNew = false;
             } else {
               // Build target directory from group_order dimensions
               let targetDir = fullRoutinesDir;
@@ -437,27 +463,255 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
               }
               if (targetDir !== fullRoutinesDir) mkdirSync(targetDir, { recursive: true });
               outFile = resolve(targetDir, `${bareName}.sql`);
+              isNew = true;
             }
-            await Bun.write(outFile, routineSql);
 
-            if (existing) {
-              updated++;
+            // Collect routine SQL and parsed data by target file
+            let entry = fileRoutines.get(outFile);
+            if (!entry) {
+              entry = { sqls: [], parsed: [], isNew };
+              fileRoutines.set(outFile, entry);
+            }
+            entry.sqls.push(routineSql);
+            entry.parsed.push(...parsed);
+          }
+
+          // Second pass: determine changes, prompt interactively, write
+          let created = 0;
+          let updated = 0;
+          let unchanged = 0;
+          let skipped = 0;
+          let aborted = false;
+          const interactive = !(flags?.force);
+          let autoCreate = false;  // auto-approve all creates
+          let autoUpdate = false;  // auto-approve all updates
+          const syncSkip = new Set(config.project.sync_skip);
+          const newSkips: string[] = [];
+
+          for (const [outFile, { sqls, parsed: dbParsed, isNew }] of fileRoutines) {
+            const combined = sqls.join("\n");
+            const relPath = outFile.slice(process.cwd().length + 1);
+            const originalContent = existingFileContents.get(outFile);
+
+            // Check sync_skip list
+            if (syncSkip.has(relPath)) {
+              skipped++;
               if (config.verbose) {
-                console.error(pc.yellow(`  ${bareName} (updated)`));
+                console.error(pc.dim(`  ${relPath} (skipped — in sync_skip)`));
+              }
+              continue;
+            }
+
+            // Determine if file needs writing and describe changes
+            if (originalContent != null) {
+              if (forceFormat) {
+                if (originalContent.trimEnd() === combined.trimEnd()) {
+                  unchanged++;
+                  if (config.verbose) {
+                    console.error(pc.dim(`  ${relPath} (unchanged)`));
+                  }
+                  continue;
+                }
+              } else {
+                const fileParsed = parseRoutines(originalContent, { grants: config.project.grants });
+                if (fileParsed.length === dbParsed.length) {
+                  let allMatch = true;
+                  for (let i = 0; i < fileParsed.length; i++) {
+                    if (parsedRoutinesDiffer(fileParsed[i], dbParsed[i], { ignoreBodyWhitespace: config.project.ignore_body_whitespace })) {
+                      allMatch = false;
+                      break;
+                    }
+                  }
+                  if (allMatch) {
+                    unchanged++;
+                    if (config.verbose) {
+                      console.error(pc.dim(`  ${relPath} (unchanged)`));
+                    }
+                    continue;
+                  }
+                }
+              }
+            }
+
+            // Build change description and prompt
+            if (interactive && !(isNew && autoCreate) && !(!isNew && autoUpdate)) {
+              if (isNew) {
+                console.log(`\n${pc.green("CREATE")} ${pc.bold(relPath)}`);
+                for (const r of dbParsed) {
+                  const qual = r.schema ? `${r.schema}.${r.name}` : r.name;
+                  console.log(`  ${pc.green("+")} ${qual}  ${pc.dim(`[${r.type}]`)}`);
+                }
+              } else {
+                console.log(`\n${pc.yellow("UPDATE")} ${pc.bold(relPath)}`);
+                const fileParsed = parseRoutines(originalContent!, { grants: config.project.grants });
+                for (const dbr of dbParsed) {
+                  const qual = dbr.schema ? `${dbr.schema}.${dbr.name}` : dbr.name;
+                  const match = fileParsed.find((fp) => fp.name === dbr.name && fp.schema === dbr.schema);
+                  if (!match) {
+                    console.log(`  ${pc.green("+")} ${qual}  ${pc.dim("[new routine]")}`);
+                  } else {
+                    const changes: string[] = [];
+                    if (parsedRoutinesDiffer(
+                      { ...match, comment: null, grants: [] },
+                      { ...dbr, comment: null, grants: [] },
+                      { ignoreBodyWhitespace: config.project.ignore_body_whitespace },
+                    )) {
+                      changes.push("definition");
+                    }
+                    if ((match.comment ?? null) !== (dbr.comment ?? null)) {
+                      changes.push("comment");
+                    }
+                    if (match.grants.length !== dbr.grants.length ||
+                        match.grants.some((g, i) =>
+                          g.privilege !== dbr.grants[i]?.privilege ||
+                          g.grantee !== dbr.grants[i]?.grantee ||
+                          g.isGrant !== dbr.grants[i]?.isGrant)) {
+                      changes.push("grants");
+                    }
+                    if (changes.length > 0) {
+                      console.log(`  ${pc.yellow("~")} ${qual}  ${pc.dim(`[${changes.join(", ")}]`)}`);
+                    }
+                  }
+                  if (forceFormat) {
+                    console.log(`  ${pc.dim("  (reformatting)")}`);
+                  }
+                }
+              }
+
+              const action = askSyncAction();
+              if (action === "quit") {
+                aborted = true;
+                break;
+              }
+              if (action === "never") {
+                skipped++;
+                newSkips.push(relPath);
+                console.log(pc.dim(`  → Added to sync_skip`));
+                continue;
+              }
+              if (action === "no") {
+                skipped++;
+                continue;
+              }
+              if (action === "all") {
+                autoCreate = true;
+                autoUpdate = true;
+              } else if (action === "all-create") {
+                autoCreate = true;
+              } else if (action === "all-update") {
+                autoUpdate = true;
+              }
+            }
+
+            if (isNew || forceFormat) {
+              // New file or --format: write full formatted output
+              await Bun.write(outFile, combined);
+            } else {
+              // Existing file: apply surgical patches per routine
+              let patched = originalContent!;
+              const fileParsed = parseRoutines(patched, { grants: config.project.grants });
+
+              const bodyFixes: { routine: ParsedRoutine; catalogBody: string }[] = [];
+              const commentFixes: { routine: ParsedRoutine; catalogComment: string }[] = [];
+              const commentRemovals: ParsedRoutine[] = [];
+              const grantFixes: { routine: ParsedRoutine; catalogGrants: ParsedRoutine["grants"] }[] = [];
+
+              for (const dbr of dbParsed) {
+                const match = fileParsed.find((fp) => fp.name === dbr.name && fp.schema === dbr.schema);
+                if (!match) continue; // new routine in file — can't patch surgically
+
+                // Body
+                if (dbr.body != null && match.body != null) {
+                  const ignoreWs = config.project.ignore_body_whitespace;
+                  if (bodyHash(match.body, ignoreWs) !== bodyHash(dbr.body, ignoreWs)) {
+                    bodyFixes.push({ routine: match, catalogBody: dbr.body });
+                  }
+                }
+
+                // Comment
+                if ((match.comment ?? null) !== (dbr.comment ?? null)) {
+                  if (dbr.comment != null) {
+                    commentFixes.push({ routine: match, catalogComment: dbr.comment });
+                  } else {
+                    commentRemovals.push(match);
+                  }
+                }
+
+                // Grants
+                if (config.project.grants) {
+                  const grantsDiff = match.grants.length !== dbr.grants.length ||
+                    match.grants.some((g, i) =>
+                      g.privilege !== dbr.grants[i]?.privilege ||
+                      g.grantee !== dbr.grants[i]?.grantee ||
+                      g.isGrant !== dbr.grants[i]?.isGrant);
+                  if (grantsDiff) {
+                    grantFixes.push({ routine: match, catalogGrants: dbr.grants });
+                  }
+                }
+              }
+
+              // Check for routines in DB but not in file (can't patch, need full write)
+              const hasNewRoutines = dbParsed.some((dbr) =>
+                !fileParsed.find((fp) => fp.name === dbr.name && fp.schema === dbr.schema));
+
+              if (hasNewRoutines) {
+                // Fall back to full write for files with new routines
+                await Bun.write(outFile, combined);
+              } else {
+                // Apply surgical patches
+                if (bodyFixes.length > 0) {
+                  const r = applyBodyFixes(patched, bodyFixes);
+                  patched = r.content;
+                }
+                if (commentRemovals.length > 0) {
+                  const r = removeComments(patched, commentRemovals);
+                  patched = r.content;
+                }
+                if (commentFixes.length > 0) {
+                  const r = applyCommentFixes(patched, commentFixes, formatOpts);
+                  patched = r.content;
+                }
+                if (grantFixes.length > 0) {
+                  const r = applyGrantFixes(patched, grantFixes, formatOpts);
+                  patched = r.content;
+                }
+                if (patched !== originalContent) {
+                  await Bun.write(outFile, patched);
+                }
+              }
+            }
+
+            if (isNew) {
+              created++;
+              if (!interactive && config.verbose) {
+                console.error(pc.green(`  ${relPath} (created)`));
               }
             } else {
-              created++;
-              if (config.verbose) {
-                console.error(pc.green(`  ${bareName} (created)`));
+              updated++;
+              if (!interactive && config.verbose) {
+                console.error(pc.yellow(`  ${relPath} (updated)`));
               }
             }
+          }
+
+          // Persist new sync_skip entries
+          if (newSkips.length > 0) {
+            const allSkips = [...config.project.sync_skip, ...newSkips];
+            await updateConfigArray("project", "sync_skip", allSkips);
+          }
+
+          if (aborted) {
+            console.log(pc.yellow("\nSync aborted."));
           }
 
           const parts: string[] = [];
           if (created > 0) parts.push(pc.green(`${created} created`));
           if (updated > 0) parts.push(pc.yellow(`${updated} updated`));
           if (unchanged > 0) parts.push(`${unchanged} unchanged`);
-          console.log(success(`Routines in ${pc.bold(routinesDir + "/")}: ${parts.join(", ")}`));
+          if (skipped > 0) parts.push(pc.dim(`${skipped} skipped`));
+          if (parts.length > 0) {
+            console.log(success(`Routines in ${pc.bold(routinesDir + "/")}: ${parts.join(", ")}`));
+          }
         } finally {
           try { unlinkSync(routineTocFile); } catch {}
         }

@@ -47,19 +47,28 @@ Extract database schema and routines into project files (DB → Files):
 
 - Dumps the full schema to `migrations_dir/schema.sql` (DDL for tables, types, etc.)
 - Extracts each routine (function, procedure, or other configured types) into individual `.sql` files in `routines_dir`
-- Applies configurable formatting (see `[format]` options)
+- Applies configurable formatting to new files (see `[format]` options)
 - Organizes files into subdirectories based on `group_order` (by API type, schema, name segment, or object kind)
 - Supports `VIEW` extraction when added to `routine_types`
-- On re-sync, updates existing files in place and reports created/updated/unchanged counts
-
-Selective sync updates only specific aspects of existing source files without overwriting them:
+- **Interactive by default** — shows each change and prompts before writing:
+  - `Y` (default) — apply this change
+  - `n` — skip this file
+  - `N` — skip and remember (adds to `sync_skip` in config, skipped in future syncs)
+  - `a` — apply all remaining changes without prompting
+  - `q` — quit immediately
+- **Functional comparison** — existing files are only updated when there's a real difference (definition, comments, grants), not just formatting. User formatting is preserved for unchanged files.
+- Handles multi-routine files — multiple routines in one file are synced together
 
 | Flag | Description |
 |------|-------------|
-| `--comments` | Surgically insert or update `COMMENT ON` statements from the database |
-| `--grants` | Update `GRANT`/`REVOKE` statements from the database |
-| `--definitions` | Update routine definitions from the database |
-| `--all` | Apply all selective updates above |
+| `--force`, `-f` | Skip interactive prompts, write all changes immediately |
+| `--format` | Rewrite all files using configured format options (normalizes formatting) |
+| `--comments` | Patch only `COMMENT ON` statements in existing files (combinable) |
+| `--grants` | Patch only `GRANT`/`REVOKE` statements in existing files (combinable) |
+| `--definitions` | Patch only routine definitions in existing files (combinable) |
+| `--all` | Patch comments, grants, and definitions |
+
+Note: `--format` cannot be combined with `--comments`/`--grants`/`--definitions`.
 
 ### `pgdev diff`
 
@@ -175,6 +184,7 @@ internal_dir = ""
 group_segment = 0
 skip_prefixes = []
 group_order = []
+sync_skip = []
 
 # SQL formatting options (applied during sync)
 [format]
@@ -266,6 +276,7 @@ Project directories and sync/diff settings.
 | `group_segment` | `0` | Name segment index for the "name" grouping dimension (0 = disabled). Splits on `_` after skipping common prefixes |
 | `skip_prefixes` | `[]` | Prefixes to skip when extracting group segment (e.g. `["get", "set", "delete"]`). Uses built-in defaults when empty |
 | `group_order` | `[]` | Directory nesting order. Available dimensions: `"type"`, `"schema"`, `"name"`, `"kind"`. Empty = flat directory |
+| `sync_skip` | `[]` | Files to skip during sync (relative paths, managed via interactive sync's "Never" option) |
 
 **Directory grouping dimensions:**
 

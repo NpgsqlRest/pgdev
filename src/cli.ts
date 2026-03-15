@@ -430,10 +430,14 @@ ${pc.bold("Usage:")}
 ${pc.bold("Commands:")}
   config          Interactive TUI for tools, NpgsqlRest config, and project setup
   sync            Extract routines and schema from database into project files
-    --comments          Patch comments into existing files (no overwrite)
-    --grants            Patch grants into existing files (no overwrite)
-    --definitions       Patch definitions into existing files (no overwrite)
-    --all               Patch all of the above into existing files
+                    Interactive by default — shows changes and prompts before writing
+    --force, -f         Skip interactive prompts, write all changes immediately
+    --format            Rewrite all files using configured format options
+    --comments          Patch only comments into existing files (combinable)
+    --grants            Patch only grants into existing files (combinable)
+    --definitions       Patch only definitions into existing files (combinable)
+    --all               Patch comments, grants, and definitions
+                        Note: --format cannot be combined with patch flags
   diff            Compare project files against database (read-only)
     --script [file]     Generate SQL migration script for all differences
   exec <sql>      Run a SQL statement via psql
@@ -521,6 +525,8 @@ export async function run(): Promise<void> {
         comments: args.includes("--comments") || args.includes("--all"),
         grants: args.includes("--grants") || args.includes("--all"),
         definitions: args.includes("--definitions") || args.includes("--all"),
+        format: args.includes("--format"),
+        force: args.includes("--force") || args.includes("-f"),
       };
       await syncCommand(config, syncFlags);
       break;

@@ -264,6 +264,76 @@ export function grantsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): bo
   return false;
 }
 
+/**
+ * Compare two ParsedRoutine objects (e.g. file vs pg_dump output).
+ * Returns true if they differ functionally (ignoring formatting).
+ */
+export function parsedRoutinesDiffer(a: ParsedRoutine, b: ParsedRoutine, options?: DiffOptions): boolean {
+  if (a.type !== b.type) return true;
+
+  // Parameters
+  if (a.parameters.length !== b.parameters.length) return true;
+  for (let i = 0; i < a.parameters.length; i++) {
+    if ((a.parameters[i].name ?? null) !== (b.parameters[i].name ?? null)) return true;
+    if (normalizeType(a.parameters[i].type) !== normalizeType(b.parameters[i].type)) return true;
+  }
+
+  // Returns
+  if (parsedReturnsDiffer(a.returns, b.returns)) return true;
+
+  // Body
+  if (bodyDiffers(a.body, b.body, options?.ignoreBodyWhitespace)) return true;
+
+  // Attributes — normalize both to catalog form and compare
+  const attrsA = attributesToCatalog(a);
+  const attrsB = attributesToCatalog(b);
+  if (attrsA.language !== attrsB.language) return true;
+  if (attrsA.volatility !== attrsB.volatility) return true;
+  if (attrsA.strict !== attrsB.strict) return true;
+  if (attrsA.securityDefiner !== attrsB.securityDefiner) return true;
+  if (attrsA.parallel !== attrsB.parallel) return true;
+  if (attrsA.leakproof !== attrsB.leakproof) return true;
+  if (attrsA.cost !== attrsB.cost) return true;
+  if (attrsA.rows !== attrsB.rows) return true;
+  if (attrsA.config.length !== attrsB.config.length) return true;
+  for (let i = 0; i < attrsA.config.length; i++) {
+    if (attrsA.config[i] !== attrsB.config[i]) return true;
+  }
+
+  // Comment
+  if ((a.comment ?? null) !== (b.comment ?? null)) return true;
+
+  // Grants
+  if (a.grants.length !== b.grants.length) return true;
+  for (let i = 0; i < a.grants.length; i++) {
+    if (a.grants[i].privilege !== b.grants[i].privilege) return true;
+    if (a.grants[i].grantee !== b.grants[i].grantee) return true;
+    if (a.grants[i].isGrant !== b.grants[i].isGrant) return true;
+  }
+
+  return false;
+}
+
+function parsedReturnsDiffer(a: ParsedRoutine["returns"], b: ParsedRoutine["returns"]): boolean {
+  if (a == null && b == null) return false;
+  if (a == null || b == null) return true;
+
+  if (a.setof !== b.setof) return true;
+  if (normalizeType(a.type ?? "") !== normalizeType(b.type ?? "")) return true;
+
+  // TABLE columns
+  if ((a.table == null) !== (b.table == null)) return true;
+  if (a.table && b.table) {
+    if (a.table.length !== b.table.length) return true;
+    for (let i = 0; i < a.table.length; i++) {
+      if (a.table[i].name !== b.table[i].name) return true;
+      if (normalizeType(a.table[i].type) !== normalizeType(b.table[i].type)) return true;
+    }
+  }
+
+  return false;
+}
+
 function returnsDiffer(parsed: ParsedRoutine, catalog: CatalogRoutine): boolean {
   const pr = parsed.returns;
   const cr = catalog.returns;
