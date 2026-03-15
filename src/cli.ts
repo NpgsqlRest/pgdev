@@ -248,8 +248,7 @@ async function printStatus(): Promise<void> {
 
   // Project directories
   const dirs = [
-    { label: "routines", path: config.project.routines_dir },
-    { label: "migrations", path: config.project.migrations_dir },
+    { label: "project", path: config.project.project_dir },
     { label: "tests", path: config.project.tests_dir },
   ];
   console.log();

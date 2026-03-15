@@ -14,6 +14,32 @@ import { applyCommentFixes, applyBodyFixes, applyGrantFixes, removeComments } fr
 import type { ParsedRoutine } from "../parser/routine.ts";
 import { bodyHash } from "../parser/catalog.ts";
 
+/** Generate the default pgdev TOML header block for new files. */
+function pgdevHeader(type: "routine" | "versioned", version?: string): string {
+  const typeValue = version ? "versioned" : type;
+  const versionLine = version
+    ? `version = "${version}"`
+    : `# version = ""`;
+  return `/*
+---
+[pgdev]
+# Migration type: "routine" or "repeatable" or "versioned"
+# For versioned, set version instead (implies versioned automatically)
+type = "${typeValue}"
+
+# Version number (implies type = "versioned"), e.g. version = "0001"
+${versionLine}
+
+# Execute this file before the referenced file in the migration script
+# run_before = ""
+
+# Re-execute this file whenever any of the referenced files are executed, even if unchanged
+# rerun_with = []
+---
+*/
+`;
+}
+
 type SyncAction = "yes" | "no" | "never" | "all" | "all-create" | "all-update" | "quit";
 
 /**
@@ -126,10 +152,10 @@ export function parseRoutineGroups(
  * by comparing parsed routines against the database catalog.
  */
 async function selectiveSync(config: PgdevConfig, flags: SyncFlags): Promise<void> {
-  const { routines_dir, schemas, grants } = config.project;
+  const { project_dir, schemas, grants } = config.project;
 
-  if (!routines_dir) {
-    console.error(error("No routines_dir configured. Run pgdev config to set it up."));
+  if (!project_dir) {
+    console.error(error("No project_dir configured. Run pgdev config to set it up."));
     process.exit(1);
   }
 
@@ -138,15 +164,15 @@ async function selectiveSync(config: PgdevConfig, flags: SyncFlags): Promise<voi
     process.exit(1);
   }
 
-  const fullDir = resolve(process.cwd(), routines_dir);
+  const fullDir = resolve(process.cwd(), project_dir);
   if (!existsSync(fullDir)) {
-    console.error(error(`Routines directory not found: ${routines_dir}`));
+    console.error(error(`Project directory not found: ${project_dir}`));
     process.exit(1);
   }
 
   const sqlFiles = findSqlFiles(fullDir);
   if (sqlFiles.length === 0) {
-    console.log(pc.yellow("No .sql files found in " + routines_dir));
+    console.log(pc.yellow("No .sql files found in " + project_dir));
     return;
   }
 
@@ -236,15 +262,15 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
     return selectiveSync(config, flags);
   }
 
-  const migrationsDir = config.project.migrations_dir;
-  if (!migrationsDir) {
-    console.error(error("No migrations_dir configured. Run pgdev config to set it up."));
+  const projectDir = config.project.project_dir;
+  if (!projectDir) {
+    console.error(error("No project_dir configured. Run pgdev config to set it up."));
     process.exit(1);
   }
 
-  const fullDir = resolve(process.cwd(), migrationsDir);
+  const fullDir = resolve(process.cwd(), projectDir);
   if (!existsSync(fullDir)) {
-    console.error(error(`migrations_dir does not exist: ${fullDir}`));
+    console.error(error(`project_dir does not exist: ${fullDir}`));
     process.exit(1);
   }
 
@@ -347,20 +373,33 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
 
       const cleaned = cleanRestoreOutput(restoreStdout);
 
-      const outPath = resolve(fullDir, "schema.sql");
+      const outPath = resolve(fullDir, "V000_schema.sql");
       if (existsSync(outPath)) {
         console.log(pc.dim(`Schema file already exists: ${outPath} (skipped)`));
       } else {
-        await Bun.write(outPath, cleaned);
-        console.log(success(`Schema written to ${pc.bold(outPath)}`));
+        const interactive = !(flags?.force);
+        let writeSchema = true;
+        if (interactive) {
+          console.log(`\n${pc.green("CREATE")} ${pc.bold("V000_schema.sql")}  ${pc.dim("initial schema dump")}`);
+          const action = askSyncAction();
+          if (action === "quit") {
+            return;
+          }
+          writeSchema = action === "yes" || action === "all" || action === "all-create";
+        }
+        if (writeSchema) {
+          await Bun.write(outPath, pgdevHeader("versioned", "000") + cleaned);
+          console.log(success(`Schema written to ${pc.bold(outPath)}`));
+        } else {
+          console.log(pc.dim("  V000_schema.sql skipped"));
+        }
       }
     } finally {
       try { unlinkSync(tocFile); } catch {}
     }
 
     // Step 4: Extract routines to individual files
-    const routinesDir = config.project.routines_dir;
-    if (routinesDir) {
+    {
       // Warn about group_order dimensions with missing config
       const groupOrder = config.project.group_order;
       if (groupOrder.includes("type") && !config.project.api_dir && !config.project.internal_dir) {
@@ -369,7 +408,7 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
       if (groupOrder.includes("name") && config.project.group_segment <= 0) {
         console.error(pc.yellow(`Warning: group_order includes "name" but group_segment is 0 (disabled) — "name" dimension will have no effect.`));
       }
-      const fullRoutinesDir = resolve(process.cwd(), routinesDir);
+      const fullRoutinesDir = fullDir;
       mkdirSync(fullRoutinesDir, { recursive: true });
 
       // Scan existing files to map routine names to file paths
@@ -605,7 +644,8 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
 
             if (isNew || forceFormat) {
               // New file or --format: write full formatted output
-              await Bun.write(outFile, combined);
+              const content = isNew ? pgdevHeader("routine") + combined : combined;
+              await Bun.write(outFile, content);
             } else {
               // Existing file: apply surgical patches per routine
               let patched = originalContent!;
@@ -710,7 +750,7 @@ export async function syncCommand(config: PgdevConfig, flags?: SyncFlags): Promi
           if (unchanged > 0) parts.push(`${unchanged} unchanged`);
           if (skipped > 0) parts.push(pc.dim(`${skipped} skipped`));
           if (parts.length > 0) {
-            console.log(success(`Routines in ${pc.bold(routinesDir + "/")}: ${parts.join(", ")}`));
+            console.log(success(`Routines in ${pc.bold(projectDir + "/")}: ${parts.join(", ")}`));
           }
         } finally {
           try { unlinkSync(routineTocFile); } catch {}

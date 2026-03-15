@@ -1999,9 +1999,6 @@ function validateProjectDir(
   try {
     const stat = statSync(abs);
     if (!stat.isDirectory()) return `"${dir}" exists but is not a directory`;
-    // If existing, must be empty
-    const entries = readdirSync(abs);
-    if (entries.length > 0) return `"${dir}" is not empty`;
   } catch {
     // Doesn't exist yet — that's fine
   }
@@ -2017,7 +2014,7 @@ function validateProjectDir(
   }
 
   // Can't overlap with other project dirs
-  const PROJECT_KEYS = ["routines_dir", "migrations_dir", "tests_dir"] as const;
+  const PROJECT_KEYS = ["project_dir", "tests_dir"] as const;
   for (const otherKey of PROJECT_KEYS) {
     if (otherKey === key) continue;
     const otherDir = config.project[otherKey];
@@ -2030,7 +2027,7 @@ function validateProjectDir(
 }
 
 async function handleProjectDir(
-  key: "routines_dir" | "migrations_dir" | "tests_dir",
+  key: "project_dir" | "tests_dir",
   label: string,
   config: PgdevConfig,
 ): Promise<string | undefined> {
@@ -2074,7 +2071,7 @@ function projectDirStatus(value: string): string {
 }
 
 function projectStatus(config: PgdevConfig): string {
-  const set = [config.project.routines_dir, config.project.migrations_dir, config.project.tests_dir].filter(Boolean);
+  const set = [config.project.project_dir, config.project.tests_dir].filter(Boolean);
   if (set.length === 0) return "not configured";
   return `${set.length} dir${set.length > 1 ? "s" : ""} configured`;
 }
@@ -2116,16 +2113,10 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
         title: "",
         items: [
           {
-            key: "routines_dir",
-            label: "Routines directory",
-            value: projectDirStatus(currentConfig.project.routines_dir),
-            help: "Directory for SQL files containing PostgreSQL functions and procedures.\nThese define the REST API surface exposed by NpgsqlRest.",
-          },
-          {
-            key: "migrations_dir",
-            label: "Migrations directory",
-            value: projectDirStatus(currentConfig.project.migrations_dir),
-            help: "Directory for versioned migration SQL scripts.\nSupports up/down, repeatable before/after, ordering by convention or config.",
+            key: "project_dir",
+            label: "Project directory",
+            value: projectDirStatus(currentConfig.project.project_dir),
+            help: "Directory for SQL source files: routines, schema, and versioned migrations.\nRoutines are organized into subdirectories by group_order.\nSchema is stored as V000_schema.sql in the root.",
           },
           {
             key: "tests_dir",
@@ -2146,10 +2137,9 @@ async function editProjectDirectories(config: PgdevConfig): Promise<void> {
     if (choice.type === "item") {
       lastSelected = choice.key;
 
-      const key = choice.key as "routines_dir" | "migrations_dir" | "tests_dir";
+      const key = choice.key as "project_dir" | "tests_dir";
       const labels: Record<string, string> = {
-        routines_dir: "Routines directory",
-        migrations_dir: "Migrations directory",
+        project_dir: "Project directory",
         tests_dir: "Tests directory",
       };
       lastStatus = await handleProjectDir(key, labels[key], currentConfig);
@@ -2231,13 +2221,13 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             key: "api_dir",
             label: "API routines dir",
             value: currentConfig.project.api_dir || pc.dim("(none)"),
-            help: "Subdirectory within routines_dir for API (HTTP endpoint) routines.\nA routine is an API routine if its comment contains HTTP at the start or start of a line.\nLeave empty to place all routines directly in routines_dir.",
+            help: "Subdirectory within project_dir for API (HTTP endpoint) routines.\nA routine is an API routine if its comment contains HTTP at the start or start of a line.\nLeave empty to place all routines directly in project_dir.",
           },
           {
             key: "internal_dir",
             label: "Internal routines dir",
             value: currentConfig.project.internal_dir || pc.dim("(none)"),
-            help: "Subdirectory within routines_dir for internal (non-API) routines.\nLeave empty to place all routines directly in routines_dir.",
+            help: "Subdirectory within project_dir for internal (non-API) routines.\nLeave empty to place all routines directly in project_dir.",
           },
           {
             key: "group_segment",
@@ -2261,7 +2251,7 @@ export async function configCommand(config: PgdevConfig): Promise<void> {
             key: "group_order",
             label: "Group order",
             value: currentConfig.project.group_order.length > 0 ? currentConfig.project.group_order.join(", ") : pc.dim("flat"),
-            help: "Directory nesting order. Each element adds a subdirectory level.\nAvailable: type (api/internal), schema, name (name segment), kind (function/procedure).\nExample: type, schema, name → api/myschema/auth/routine.sql\nEmpty = flat (all files in routines_dir).",
+            help: "Directory nesting order. Each element adds a subdirectory level.\nAvailable: type (api/internal), schema, name (name segment), kind (function/procedure).\nExample: type, schema, name → api/myschema/auth/routine.sql\nEmpty = flat (all files in project_dir).",
           },
         ],
       },

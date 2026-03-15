@@ -26,13 +26,13 @@ export interface CommandsConfig {
 export type GroupDimension = "type" | "schema" | "name" | "kind";
 
 export interface ProjectConfig {
-  routines_dir: string;
-  migrations_dir: string;
+  project_dir: string;
+  project_name: string;
   tests_dir: string;
   schemas: string[];
   grants: boolean;
   ignore_body_whitespace: boolean;
-  /** Object types to extract into individual files (excluded from schema.sql) */
+  /** Object types to extract into individual files (excluded from V000_schema.sql) */
   routine_types: string[];
   api_dir: string;
   internal_dir: string;
@@ -42,6 +42,18 @@ export interface ProjectConfig {
   group_order: GroupDimension[];
   /** Files to skip during sync (relative paths, set via "Never" in interactive mode) */
   sync_skip: string[];
+  /** Migration file prefix for versioned (up) migrations */
+  up_prefix: string;
+  /** Migration file prefix for repeatable migrations */
+  repeatable_prefix: string;
+  /** Separator between prefix/version and name in migration filenames */
+  separator: string;
+  /** History tracking mode */
+  history_mode: "comment" | "table";
+  /** Schema for history table (table mode only) */
+  history_schema: string;
+  /** Table name for history (table mode only, defaults to "{project_name}_history") */
+  history_table: string;
 }
 
 export interface FormatConfig {
@@ -90,8 +102,8 @@ const defaults: PgdevConfig = {
     connection_name: "Default",
   },
   project: {
-    routines_dir: "",
-    migrations_dir: "",
+    project_dir: "",
+    project_name: "",
     tests_dir: "",
     schemas: [],
     grants: false,
@@ -103,6 +115,12 @@ const defaults: PgdevConfig = {
     skip_prefixes: [],
     group_order: [],
     sync_skip: [],
+    up_prefix: "V",
+    repeatable_prefix: "R",
+    separator: "__",
+    history_mode: "comment",
+    history_schema: "pgdev",
+    history_table: "",
   },
   format: {
     lowercase: true,
@@ -414,19 +432,25 @@ const EXPECTED_KEYS: { section: string; key: string; raw: string }[] = [
   // [commands]
   { section: "commands", key: "schemas_query", raw: `schemas_query = "${defaults.commands.schemas_query}"` },
   // [project]
-  { section: "project", key: "routines_dir", raw: 'routines_dir = ""' },
-  { section: "project", key: "migrations_dir", raw: 'migrations_dir = ""' },
+  { section: "project", key: "project_dir", raw: 'project_dir = ""' },
+  { section: "project", key: "project_name", raw: '# Project name — scopes migration history; required when history_mode = "comment"\nproject_name = ""' },
   { section: "project", key: "tests_dir", raw: 'tests_dir = ""' },
   { section: "project", key: "schemas", raw: "schemas = []" },
   { section: "project", key: "grants", raw: "# Track GRANT/REVOKE statements for routines\ngrants = false" },
   { section: "project", key: "ignore_body_whitespace", raw: "# Ignore whitespace differences in routine bodies when comparing\nignore_body_whitespace = false" },
-  { section: "project", key: "api_dir", raw: "# Subdirectory within routines_dir for API (HTTP endpoint) routines\napi_dir = \"\"" },
-  { section: "project", key: "internal_dir", raw: "# Subdirectory within routines_dir for internal (non-API) routines\ninternal_dir = \"\"" },
+  { section: "project", key: "api_dir", raw: "# Subdirectory within project_dir for API (HTTP endpoint) routines\napi_dir = \"\"" },
+  { section: "project", key: "internal_dir", raw: "# Subdirectory within project_dir for internal (non-API) routines\ninternal_dir = \"\"" },
   { section: "project", key: "group_segment", raw: "# Group routines into subdirs by name segment (0 = disabled, 1 = first segment)\ngroup_segment = 0" },
   { section: "project", key: "skip_prefixes", raw: "# Prefixes to skip when grouping by name segment (empty = use built-in defaults)\n# skip_prefixes = [\"get\", \"set\", \"delete\", \"insert\", \"update\", \"create\", \"remove\", \"find\", \"list\", \"is\", \"has\", \"check\", \"count\", \"compute\", \"run\", \"do\", \"send\"]\nskip_prefixes = []" },
-  { section: "project", key: "routine_types", raw: "# Object types to extract into individual files (excluded from schema.sql)\nroutine_types = [\"FUNCTION\", \"PROCEDURE\"]" },
+  { section: "project", key: "routine_types", raw: "# Object types to extract into individual files (excluded from V000_schema.sql)\nroutine_types = [\"FUNCTION\", \"PROCEDURE\"]" },
   { section: "project", key: "group_order", raw: "# Directory nesting order. Each element adds a subdirectory level.\n# Available: \"type\" (api/internal), \"schema\", \"name\" (name segment), \"kind\" (function/procedure)\n# Example: [\"type\", \"schema\", \"name\"] → api/myschema/auth/get_auth_login.sql\ngroup_order = []" },
   { section: "project", key: "sync_skip", raw: "# Files to skip during sync (relative paths, managed via interactive sync)\nsync_skip = []" },
+  { section: "project", key: "up_prefix", raw: '# Filename prefix for versioned (up) migrations, e.g. V001__schema.sql\nup_prefix = "V"' },
+  { section: "project", key: "repeatable_prefix", raw: '# Filename prefix for repeatable migrations, e.g. R__seed_data.sql\nrepeatable_prefix = "R"' },
+  { section: "project", key: "separator", raw: '# Separator between prefix/version and name in migration filenames\nseparator = "__"' },
+  { section: "project", key: "history_mode", raw: '# Migration history tracking: "comment" (database comment) or "table" (dedicated table)\nhistory_mode = "comment"' },
+  { section: "project", key: "history_schema", raw: '# Schema for history table (table mode only)\nhistory_schema = "pgdev"' },
+  { section: "project", key: "history_table", raw: '# Table name for history (table mode only, defaults to "{project_name}_history")\nhistory_table = ""' },
   // [format]
   { section: "format", key: "lowercase", raw: "# Lowercase SQL keywords in formatted output\nlowercase = true" },
   { section: "format", key: "param_style", raw: '# Parameter layout: "inline" or "multiline"\nparam_style = "multiline"' },
@@ -564,8 +588,9 @@ password = "{PGPASSWORD}"
 # Leave empty to skip; directories are created when first needed
 [project]
 
-routines_dir = ""
-migrations_dir = ""
+project_dir = ""
+# Project name — scopes migration history; required when history_mode = "comment"
+project_name = ""
 tests_dir = ""
 # Schemas used by this project (empty = all non-system schemas)
 schemas = []
@@ -573,16 +598,16 @@ schemas = []
 grants = false
 # Ignore whitespace differences in routine bodies when comparing
 ignore_body_whitespace = false
-# Subdirectory within routines_dir for API (HTTP endpoint) routines
+# Subdirectory within project_dir for API (HTTP endpoint) routines
 api_dir = ""
-# Subdirectory within routines_dir for internal (non-API) routines
+# Subdirectory within project_dir for internal (non-API) routines
 internal_dir = ""
 # Group routines into subdirs by name segment (0 = disabled, 1 = first segment)
 group_segment = 0
 # Prefixes to skip when grouping by name segment (empty = use built-in defaults)
 # skip_prefixes = ["get", "set", "delete", "insert", "update", "create", "remove", "find", "list", "is", "has", "check", "count", "compute", "run", "do", "send"]
 skip_prefixes = []
-# Object types to extract into individual files (excluded from schema.sql)
+# Object types to extract into individual files (excluded from V000_schema.sql)
 routine_types = ["FUNCTION", "PROCEDURE"]
 # Directory nesting order. Each element adds a subdirectory level.
 # Available: "type" (api/internal), "schema", "name" (name segment), "kind" (function/procedure)
@@ -590,6 +615,18 @@ routine_types = ["FUNCTION", "PROCEDURE"]
 group_order = []
 # Files to skip during sync (relative paths, managed via interactive sync)
 sync_skip = []
+# Filename prefix for versioned (up) migrations, e.g. V001__schema.sql
+up_prefix = "V"
+# Filename prefix for repeatable migrations, e.g. R__seed_data.sql
+repeatable_prefix = "R"
+# Separator between prefix/version and name in migration filenames
+separator = "__"
+# Migration history tracking: "comment" (database comment) or "table" (dedicated table)
+history_mode = "comment"
+# Schema for history table (table mode only)
+history_schema = "pgdev"
+# Table name for history (table mode only, defaults to "{project_name}_history")
+history_table = ""
 
 # SQL formatter options for routine files generated by sync
 [format]

@@ -39,16 +39,17 @@ Sections:
 - **NpgsqlRest** — detect or install NpgsqlRest (npm, bun, standalone binary, or Docker)
 - **PostgreSQL Tools** — detect or install psql, pg_dump, pg_restore (Homebrew, apt, apk, dnf)
 - **NpgsqlRest Config Files** — create and manage NpgsqlRest JSON config files (production, development, local) with a TUI editor for connection strings, config settings, and more
-- **pgdev Environment** — configure env file, database connection, and project directories (migrations, routines, tests, schemas)
+- **pgdev Environment** — configure env file, database connection, and project settings (project directory, tests, schemas)
 
 ### `pgdev sync`
 
 Extract database schema and routines into project files (DB → Files):
 
-- Dumps the full schema to `migrations_dir/schema.sql` (DDL for tables, types, etc.)
-- Extracts each routine (function, procedure, or other configured types) into individual `.sql` files in `routines_dir`
+- Dumps the full schema to `project_dir/V000_schema.sql` (DDL for tables, types, etc.) — prompted separately in interactive mode
+- Extracts each routine (function, procedure, or other configured types) into individual `.sql` files in `project_dir`
 - Applies configurable formatting to new files (see `[format]` options)
 - Organizes files into subdirectories based on `group_order` (by API type, schema, name segment, or object kind)
+- New files include a pgdev TOML header with migration metadata (`type`, `version`, `run_before`, `rerun_with`)
 - Supports `VIEW` extraction when added to `routine_types`
 - **Interactive by default** — shows each change and prompts before writing:
   - `Y` (default) — apply this change
@@ -74,7 +75,7 @@ Note: `--format` cannot be combined with `--comments`/`--grants`/`--definitions`
 
 Compare project SQL files against the live database (read-only):
 
-- Parses all `.sql` files in `routines_dir` and fetches routine metadata from `pg_catalog`
+- Parses all `.sql` files in `project_dir` and fetches routine metadata from `pg_catalog`
 - Reports routines that need creating, updating, or dropping
 - Compares definition (parameters, return type, body, attributes), comments, and optionally grants
 - Supports `ignore_body_whitespace` for whitespace-insensitive body comparison
@@ -82,7 +83,70 @@ Compare project SQL files against the live database (read-only):
 
 | Flag | Description |
 |------|-------------|
-| `--script [file]` | Generate a SQL migration script (procedural `DO` block) for all differences. Optionally specify output file path; defaults to a temp file. |
+| `--script [file]` | Generate a SQL migration script based on the full migration plan. Scans all project files, checks history, resolves dependencies, and produces a procedural `DO` block. Optionally specify output file path; defaults to a temp file. |
+
+### Migration System
+
+pgdev includes a file-based migration system that tracks three types of SQL files in `project_dir`:
+
+| Type | Naming Convention | Behavior |
+|------|------------------|----------|
+| **Routine** | `*.sql` with valid routine content | Synced from DB, executed when content hash changes |
+| **Versioned** | `V<version>__<name>.sql` | Execute once per version number |
+| **Repeatable** | `R__<name>.sql` | Execute once per content hash change |
+
+#### File Classification
+
+Files are classified by priority:
+
+1. **TOML header** — explicit `type` or `version` in the pgdev header overrides everything
+2. **Naming convention** — filename prefix (`V`/`R` + separator) determines type
+3. **Parser detection** — files containing valid routine definitions are classified as routines
+4. **Unrecognized** — warning issued, file skipped
+
+#### TOML Header
+
+SQL files can include a pgdev metadata header at the top of the file. Two formats are supported:
+
+**Format 1** — line comments:
+```sql
+-- [pgdev]
+-- type = "routine"
+-- run_before = "R__create_views"
+```
+
+**Format 2** — block comment with `---` delimiters:
+```sql
+/*
+---
+[pgdev]
+type = "routine"
+# version = ""
+# run_before = ""
+# rerun_with = []
+---
+*/
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `"routine"` \| `"repeatable"` \| `"versioned"` | Overrides naming convention |
+| `version` | `string` | Version number (implies `type = "versioned"`) |
+| `run_before` | `string` | Execute this file before the referenced file |
+| `rerun_with` | `string` \| `string[]` | Re-execute this file whenever any referenced file executes, even if unchanged |
+
+**File references** in `run_before` and `rerun_with` support flexible formats:
+- Bare name: `schema` (stripped of prefix and extension)
+- Filename: `V000_schema.sql` or `V000_schema`
+- Relative path: `test/V000_schema.sql`, `./test/V000_schema.sql`, `/test/V000_schema.sql`
+- Version number: `000` (for versioned migrations)
+
+#### History Tracking
+
+Migration history is tracked in one of two modes:
+
+- **Comment mode** (default) — stores JSON in `COMMENT ON DATABASE`, scoped by `project_name`. Zero database footprint.
+- **Table mode** — stores history in a dedicated table per project.
 
 ### `pgdev exec <sql>`
 
@@ -172,8 +236,8 @@ password = "{PGPASSWORD}"
 
 # Project directories and settings
 [project]
-routines_dir = ""
-migrations_dir = ""
+project_dir = ""
+project_name = ""
 tests_dir = ""
 schemas = []
 grants = false
@@ -185,6 +249,12 @@ group_segment = 0
 skip_prefixes = []
 group_order = []
 sync_skip = []
+up_prefix = "V"
+repeatable_prefix = "R"
+separator = "__"
+history_mode = "comment"
+history_schema = "pgdev"
+history_table = ""
 
 # SQL formatting options (applied during sync)
 [format]
@@ -260,12 +330,12 @@ Database connection for pgdev tools. Two modes:
 
 ### `[project]`
 
-Project directories and sync/diff settings.
+Project directory and sync/diff/migration settings.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `routines_dir` | `""` | Directory for extracted SQL routines |
-| `migrations_dir` | `""` | Directory for migration scripts (schema.sql is written here) |
+| `project_dir` | `""` | Directory for all project SQL files (routines, schema, migrations) |
+| `project_name` | `""` | Project name — scopes migration history; required when `history_mode = "comment"` |
 | `tests_dir` | `""` | Directory for SQL test files |
 | `schemas` | `[]` | Schemas to include (empty = all non-system schemas) |
 | `grants` | `false` | Include GRANT/REVOKE statements in sync and diff |
@@ -277,6 +347,12 @@ Project directories and sync/diff settings.
 | `skip_prefixes` | `[]` | Prefixes to skip when extracting group segment (e.g. `["get", "set", "delete"]`). Uses built-in defaults when empty |
 | `group_order` | `[]` | Directory nesting order. Available dimensions: `"type"`, `"schema"`, `"name"`, `"kind"`. Empty = flat directory |
 | `sync_skip` | `[]` | Files to skip during sync (relative paths, managed via interactive sync's "Never" option) |
+| `up_prefix` | `"V"` | Filename prefix for versioned (up) migrations |
+| `repeatable_prefix` | `"R"` | Filename prefix for repeatable migrations |
+| `separator` | `"__"` | Separator between prefix/version and name in migration filenames |
+| `history_mode` | `"comment"` | Migration history tracking: `"comment"` (database comment) or `"table"` (dedicated table) |
+| `history_schema` | `"pgdev"` | Schema for history table (table mode only) |
+| `history_table` | `""` | Table name for history (table mode only, defaults to `"{project_name}_history"`) |
 
 **Directory grouping dimensions:**
 
